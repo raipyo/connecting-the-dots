@@ -1,0 +1,5 @@
+{
+  "name": "@connecting-dots/prompts",
+  "version": "1.0.0",
+  "main": "system_prompts.py"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "@connecting-dots/schemas",
+  "version": "1.0.0",
+  "main": "entity_schemas.py",
+  "dependencies": {}
+}

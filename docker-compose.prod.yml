@@ -1,0 +1,22 @@
+# docker-compose.prod.yml
+version: '3.8'
+
+services:
+  backend:
+    restart: always
+    environment:
+      ENVIRONMENT: production
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+  
+  frontend:
+    restart: always
+    environment:
+      NODE_ENV: production
+    command: npm start
+  
+  worker:
+    restart: always
+    command: celery -A workers.embedding worker --loglevel=info --concurrency=8
+  
+  nginx:
+    restart: always
