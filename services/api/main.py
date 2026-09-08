@@ -1,354 +1,1233 @@
 import os
-import json
+import re
 import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import httpx
 from tavily import TavilyClient
-import openai
 
-# Load environment variables
+
+# ============================================================
+# CONFIG
+# ============================================================
+
 load_dotenv()
 
 app = FastAPI(title="Connecting the Dots AI")
 
-# Enable CORS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "https://connecting-the-dots-web.vercel.app"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://connecting-the-dots-web.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize clients
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# ============================================================
+# TAVILY
+# ============================================================
+
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-if not OPENAI_API_KEY or not TAVILY_API_KEY:
-    print("⚠️  WARNING: API keys not found! Using mock data...")
-    USE_MOCK = True
-else:
-    USE_MOCK = False
-    openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
-    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+if not TAVILY_API_KEY:
+    raise RuntimeError(
+        "TAVILY_API_KEY is not configured. "
+        "Add it to your .env file."
+    )
+
+tavily_client = TavilyClient(
+    api_key=TAVILY_API_KEY
+)
+
+
+# ============================================================
+# MODELS
+# ============================================================
 
 class ResearchRequest(BaseModel):
     query: str
     user_id: Optional[str] = "anonymous"
 
-class EntityExtraction(BaseModel):
-    name: str
-    type: str
-    normalized_name: str
-    description: Optional[str] = None
-    country: Optional[str] = None
-    confidence: float
-    evidence: str
 
-# ==================== REAL SEARCH FUNCTIONS ====================
+# ============================================================
+# INVESTOR CATEGORIES
+# ============================================================
 
-async def search_web(query: str) -> List[Dict[str, Any]]:
-    """Search the web using Tavily API"""
-    if USE_MOCK:
-        return get_mock_search_results(query)
-    
+INVESTOR_CATEGORIES = {
+    "VC": [
+        "venture capital",
+        "VC fund",
+        "venture fund",
+        "startup investor",
+    ],
+    "ANGEL": [
+        "angel investor",
+        "angel network",
+        "angel investing",
+        "angel fund",
+    ],
+    "ACCELERATOR": [
+        "startup accelerator",
+        "accelerator",
+        "accelerator program",
+    ],
+    "INCUBATOR": [
+        "startup incubator",
+        "incubator",
+        "incubation",
+    ],
+    "FAMILY_OFFICE": [
+        "family office",
+        "family offices",
+    ],
+    "FOUNDATION": [
+        "foundation",
+        "impact foundation",
+        "philanthropic investor",
+    ],
+    "LP": [
+        "limited partner",
+        "LP investor",
+        "institutional investor",
+        "fund of funds",
+    ],
+}
+
+
+# ============================================================
+# SEARCH QUERY GENERATION
+# ============================================================
+
+def generate_search_queries(user_query: str) -> List[Dict[str, str]]:
+    """
+    Turn one broad user query into multiple focused searches.
+
+    This is the most important improvement over the original
+    implementation.
+    """
+
+    query = user_query.lower()
+
+    queries = []
+
+    # --------------------------------------------------------
+    # Detect geography
+    # --------------------------------------------------------
+
+    geography = "India"
+
+    if "india" in query or "indian" in query:
+        geography = "India"
+
+    # --------------------------------------------------------
+    # Detect investment stage
+    # --------------------------------------------------------
+
+    stage = "early stage"
+
+    if "pre-seed" in query or "pre seed" in query:
+        stage = "pre-seed"
+
+    elif "seed" in query:
+        stage = "seed"
+
+    elif "early stage" in query or "early-stage" in query:
+        stage = "early stage"
+
+    # --------------------------------------------------------
+    # VC
+    # --------------------------------------------------------
+
+    queries.append({
+        "category": "VC",
+        "query": (
+            f"venture capital firms investing in {geography} "
+            f"startups at {stage}"
+        ),
+    })
+
+    queries.append({
+        "category": "VC",
+        "query": (
+            f"{geography} VC funds "
+            f"pre-seed seed early stage startup investors"
+        ),
+    })
+
+    queries.append({
+        "category": "VC",
+        "query": (
+            f"venture capital investors "
+            f"backing {geography} startups {stage}"
+        ),
+    })
+
+    # --------------------------------------------------------
+    # ANGELS
+    # --------------------------------------------------------
+
+    queries.append({
+        "category": "ANGEL",
+        "query": (
+            f"angel investors investing in {geography} "
+            f"startups {stage}"
+        ),
+    })
+
+    queries.append({
+        "category": "ANGEL",
+        "query": (
+            f"angel investor networks in {geography} "
+            f"startup funding pre-seed seed"
+        ),
+    })
+
+    queries.append({
+        "category": "ANGEL",
+        "query": (
+            f"{geography} angel investors "
+            f"portfolio startups early stage"
+        ),
+    })
+
+    # --------------------------------------------------------
+    # ACCELERATORS
+    # --------------------------------------------------------
+
+    queries.append({
+        "category": "ACCELERATOR",
+        "query": (
+            f"startup accelerators in {geography} "
+            f"investing pre-seed seed startups"
+        ),
+    })
+
+    queries.append({
+        "category": "ACCELERATOR",
+        "query": (
+            f"{geography} accelerators "
+            f"provide funding investment startups"
+        ),
+    })
+
+    # --------------------------------------------------------
+    # INCUBATORS
+    # --------------------------------------------------------
+
+    queries.append({
+        "category": "INCUBATOR",
+        "query": (
+            f"startup incubators in {geography} "
+            f"provide funding investment"
+        ),
+    })
+
+    queries.append({
+        "category": "INCUBATOR",
+        "query": (
+            f"{geography} technology incubators "
+            f"early stage startup funding"
+        ),
+    })
+
+    # --------------------------------------------------------
+    # FAMILY OFFICES
+    # --------------------------------------------------------
+
+    queries.append({
+        "category": "FAMILY_OFFICE",
+        "query": (
+            f"family offices investing in {geography} "
+            f"startups early stage"
+        ),
+    })
+
+    queries.append({
+        "category": "FAMILY_OFFICE",
+        "query": (
+            f"{geography} family offices "
+            f"venture capital startup investments"
+        ),
+    })
+
+    # --------------------------------------------------------
+    # FOUNDATIONS / IMPACT
+    # --------------------------------------------------------
+
+    queries.append({
+        "category": "FOUNDATION",
+        "query": (
+            f"foundations investing in {geography} "
+            f"startups impact early stage"
+        ),
+    })
+
+    queries.append({
+        "category": "FOUNDATION",
+        "query": (
+            f"impact investors funding {geography} "
+            f"early stage startups"
+        ),
+    })
+
+    # --------------------------------------------------------
+    # LP / INSTITUTIONAL
+    # --------------------------------------------------------
+
+    queries.append({
+        "category": "LP",
+        "query": (
+            f"institutional investors limited partners "
+            f"investing in {geography} venture capital funds"
+        ),
+    })
+
+    queries.append({
+        "category": "LP",
+        "query": (
+            f"LP investors backing {geography} "
+            f"venture capital funds"
+        ),
+    })
+
+    return queries
+
+
+# ============================================================
+# TEXT HELPERS
+# ============================================================
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.lower()
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+def normalize_url(url: str) -> str:
+    """
+    Normalize URLs so multiple pages from the same website
+    are easier to deduplicate.
+    """
+
+    if not url:
+        return ""
+
     try:
-        results = tavily_client.search(
-            query=query,
-            search_depth="advanced",
-            max_results=10,
-            include_answer=True,
-            include_raw_content=True
-        )
-        
-        # Process results
-        processed_results = []
-        
-        # Add answer if available
-        if results.get("answer"):
-            processed_results.append({
-                "title": "AI Answer",
-                "content": results["answer"],
-                "url": "",
-                "relevance": 1.0,
-                "source": "tavily_answer"
-            })
-        
-        # Process search results
-        for result in results.get("results", []):
-            processed_results.append({
-                "title": result.get("title", ""),
-                "content": result.get("content", ""),
-                "url": result.get("url", ""),
-                "relevance": result.get("score", 0.5),
-                "source": "web"
-            })
-        
-        return processed_results
-    except Exception as e:
-        print(f"Search error: {e}")
-        return get_mock_search_results(query)
+        parsed = urlparse(url)
 
-async def extract_entities_with_openai(text: str, query: str) -> Dict[str, Any]:
-    """Extract entities and relationships using OpenAI"""
-    if USE_MOCK:
-        return get_mock_extraction(query)
-    
-    try:
-        prompt = f"""
-        Analyze the following text and extract business entities and relationships.
-        
-        Query: {query}
-        
-        Text: {text}
-        
-        Extract:
-        1. Companies (name, type, country, description)
-        2. Relationships between entities (source, relationship_type, target, confidence)
-        3. Business opportunities
-        
-        Return as JSON with this structure:
-        {{
-            "entities": [
-                {{
-                    "name": "Company name",
-                    "type": "COMPANY|DISTRIBUTOR|RETAILER|MANUFACTURER",
-                    "normalized_name": "normalized name",
-                    "description": "description",
-                    "country": "country",
-                    "confidence": 0.95,
-                    "evidence": "evidence text"
-                }}
-            ],
-            "relationships": [
-                {{
-                    "source": "source entity name",
-                    "relationship": "EXPORTS_TO|MANUFACTURES|SUPPLIES|DISTRIBUTED_BY",
-                    "target": "target entity name",
-                    "confidence": 0.9,
-                    "status": "VERIFIED|SUPPORTED|INFERRED",
-                    "evidence": "evidence text"
-                }}
-            ],
-            "opportunities": [
-                {{
-                    "description": "opportunity description",
-                    "confidence": 0.8,
-                    "entities": ["entity1", "entity2"],
-                    "actionable": true,
-                    "potential_value": "potential value description"
-                }}
-            ]
-        }}
-        """
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a business intelligence expert. Extract entities and relationships from business text."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"}
+        domain = (
+            parsed.netloc
+            .lower()
+            .replace("www.", "")
         )
-        
-        result = json.loads(response.choices[0].message.content)
-        return result
-    except Exception as e:
-        print(f"Extraction error: {e}")
-        return get_mock_extraction(query)
 
-async def research_query(query: str) -> Dict[str, Any]:
-    """Main research function combining search and extraction"""
-    # Step 1: Search the web
-    search_results = await search_web(query)
-    
-    if not search_results:
-        return {
-            "answer": "No results found. Please try a different query.",
-            "entities": [],
-            "relationships": [],
-            "opportunities": [],
-            "citations": []
-        }
-    
-    # Step 2: Combine search results text
-    combined_text = "\n\n".join([
-        f"Source: {r.get('title', 'Unknown')}\n{r.get('content', '')}"
-        for r in search_results[:5]  # Use top 5 results
-    ])
-    
-    # Step 3: Extract entities using OpenAI
-    extraction = await extract_entities_with_openai(combined_text, query)
-    
-    # Step 4: Generate answer
-    answer = f"Based on research for: {query}\n\n"
-    if extraction.get("entities"):
-        answer += f"Found {len(extraction['entities'])} entities and {len(extraction.get('relationships', []))} relationships.\n\n"
-        
-        # Add entity details
-        for entity in extraction.get("entities", [])[:5]:
-            answer += f"• {entity.get('name')} ({entity.get('type', 'Unknown')}) - {entity.get('country', 'Location unknown')}\n"
-    
-    # Step 5: Prepare response
-    return {
-        "answer": answer,
-        "entities": extraction.get("entities", []),
-        "relationships": extraction.get("relationships", []),
-        "opportunities": extraction.get("opportunities", []),
-        "citations": [
-            {
-                "source": r.get("url", r.get("source", "Unknown")),
-                "content": r.get("content", "")[:200] + "...",
-                "relevance": r.get("relevance", 0.5)
-            }
-            for r in search_results[:5]
-        ]
+        return domain
+
+    except Exception:
+        return url.lower().strip()
+
+
+def normalize_name(name: str) -> str:
+    name = normalize_text(name)
+
+    name = re.sub(
+        r"[^a-z0-9\s]",
+        "",
+        name
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        name
+    ).strip()
+
+
+# ============================================================
+# RELEVANCE SCORING
+# ============================================================
+
+def calculate_relevance(
+    result: Dict[str, Any],
+    category: str,
+    original_query: str,
+) -> float:
+    """
+    Score a Tavily result based on investor relevance.
+
+    Tavily score is useful, but should NOT be the only signal.
+    """
+
+    title = normalize_text(
+        result.get("title", "")
+    )
+
+    content = normalize_text(
+        result.get("content", "")
+    )
+
+    text = f"{title} {content}"
+
+    tavily_score = float(
+        result.get("score", 0)
+    )
+
+    # Start with Tavily score.
+    score = tavily_score
+
+    # --------------------------------------------------------
+    # Strong positive signals
+    # --------------------------------------------------------
+
+    positive_terms = {
+        "investor": 0.18,
+        "investors": 0.18,
+        "investing": 0.20,
+        "investment": 0.18,
+        "investments": 0.18,
+        "venture capital": 0.25,
+        "venture fund": 0.20,
+        "vc fund": 0.20,
+        "fund": 0.10,
+        "portfolio": 0.12,
+        "portfolio companies": 0.15,
+        "startup funding": 0.15,
+        "funding": 0.10,
+        "backs startups": 0.18,
+        "backing startups": 0.18,
+        "early stage": 0.20,
+        "early-stage": 0.20,
+        "pre-seed": 0.25,
+        "pre seed": 0.25,
+        "seed stage": 0.22,
+        "seed": 0.08,
+        "india": 0.12,
+        "indian startups": 0.20,
+        "indian startup": 0.18,
     }
 
-# ==================== MOCK DATA (Fallback) ====================
+    for term, weight in positive_terms.items():
 
-def get_mock_search_results(query: str) -> List[Dict[str, Any]]:
-    """Mock search results when API keys are not available"""
-    query_lower = query.lower()
-    
-    # Determine country from query
-    country = "Global"
-    if "usa" in query_lower or "america" in query_lower:
-        country = "USA"
-    elif "india" in query_lower:
-        country = "India"
-    elif "uae" in query_lower or "dubai" in query_lower:
-        country = "UAE"
-    elif "europe" in query_lower:
-        country = "Europe"
-    
-    return [
-        {
-            "title": f"Business Overview - {country}",
-            "content": f"Companies in {country} are expanding their operations. Several businesses are looking for international partners and distributors.",
-            "url": "mock-source.com",
-            "relevance": 0.9,
-            "source": "mock"
-        }
+        if term in text:
+            score += weight
+
+    # --------------------------------------------------------
+    # Category-specific signals
+    # --------------------------------------------------------
+
+    category_terms = {
+        "VC": [
+            "venture capital",
+            "vc fund",
+            "venture fund",
+            "venture partner",
+            "portfolio",
+        ],
+
+        "ANGEL": [
+            "angel investor",
+            "angel network",
+            "angel fund",
+            "angel investing",
+        ],
+
+        "ACCELERATOR": [
+            "accelerator",
+            "accelerator program",
+            "startup accelerator",
+        ],
+
+        "INCUBATOR": [
+            "incubator",
+            "incubation",
+            "startup incubator",
+        ],
+
+        "FAMILY_OFFICE": [
+            "family office",
+            "family offices",
+        ],
+
+        "FOUNDATION": [
+            "foundation",
+            "impact investor",
+            "impact investing",
+        ],
+
+        "LP": [
+            "limited partner",
+            "limited partners",
+            "institutional investor",
+            "fund of funds",
+        ],
+    }
+
+    for term in category_terms.get(category, []):
+
+        if term in text:
+            score += 0.20
+
+    # --------------------------------------------------------
+    # Negative signals
+    # --------------------------------------------------------
+
+    negative_terms = {
+        "job": 0.15,
+        "jobs": 0.15,
+        "career": 0.15,
+        "careers": 0.15,
+        "salary": 0.15,
+        "hiring": 0.15,
+        "recruitment": 0.15,
+        "real estate": 0.20,
+        "loan": 0.20,
+        "insurance": 0.15,
+        "stock price": 0.15,
+        "share price": 0.15,
+        "crypto price": 0.15,
+    }
+
+    for term, penalty in negative_terms.items():
+
+        if term in text:
+            score -= penalty
+
+    # --------------------------------------------------------
+    # Require actual investment language
+    # --------------------------------------------------------
+
+    investment_evidence = [
+        "invest",
+        "investing",
+        "investment",
+        "funding",
+        "funded",
+        "portfolio",
+        "backs",
+        "backed",
     ]
 
-def get_mock_extraction(query: str) -> Dict[str, Any]:
-    """Mock extraction when OpenAI is not available"""
-    query_lower = query.lower()
-    
-    # Determine country from query
-    country = "Global"
-    if "usa" in query_lower or "america" in query_lower:
-        country = "USA"
-        companies = ["TechCorp America", "Global Solutions US"]
-    elif "india" in query_lower:
-        country = "India"
-        companies = ["EcoPack India", "GreenWrap Solutions"]
-    elif "uae" in query_lower or "dubai" in query_lower:
-        country = "UAE"
-        companies = ["Dubai Trading Co", "Emirates Logistics"]
-    else:
-        companies = ["Sample Company"]
-    
+    if not any(
+        term in text
+        for term in investment_evidence
+    ):
+        score -= 0.30
+
+    # --------------------------------------------------------
+    # India relevance
+    # --------------------------------------------------------
+
+    india_terms = [
+        "india",
+        "indian",
+        "india-focused",
+        "india focused",
+    ]
+
+    if not any(
+        term in text
+        for term in india_terms
+    ):
+        score -= 0.25
+
+    # --------------------------------------------------------
+    # Early-stage relevance
+    # --------------------------------------------------------
+
+    stage_terms = [
+        "early stage",
+        "early-stage",
+        "pre-seed",
+        "pre seed",
+        "seed stage",
+        "seed-stage",
+    ]
+
+    if any(
+        term in text
+        for term in stage_terms
+    ):
+        score += 0.20
+
+    return max(
+        0.0,
+        min(score, 2.0)
+    )
+
+
+# ============================================================
+# EXTRACT INVESTOR NAME
+# ============================================================
+
+def extract_investor_name(
+    result: Dict[str, Any]
+) -> str:
+    """
+    Try to obtain an organization name from the page title.
+
+    This is intentionally conservative. It is better to return
+    the page title than invent an investor name.
+    """
+
+    title = result.get("title", "").strip()
+
+    if not title:
+        return "Unknown organization"
+
+    # Common separators in search-result titles
+    separators = [
+        " | ",
+        " - ",
+        " – ",
+        " — ",
+        ": ",
+    ]
+
+    for separator in separators:
+
+        if separator in title:
+
+            first_part = title.split(
+                separator
+            )[0].strip()
+
+            if 2 <= len(first_part) <= 100:
+                return first_part
+
+    return title[:120]
+
+
+# ============================================================
+# SEARCH TAVILY
+# ============================================================
+
+async def search_web(
+    query: str
+) -> List[Dict[str, Any]]:
+    """
+    Run multiple targeted Tavily searches.
+    """
+
+    search_queries = generate_search_queries(
+        query
+    )
+
+    all_results = []
+
+    print(
+        f"🔎 Generated "
+        f"{len(search_queries)} targeted searches"
+    )
+
+    # --------------------------------------------------------
+    # Execute searches
+    # --------------------------------------------------------
+
+    for search in search_queries:
+
+        category = search["category"]
+
+        search_query = search["query"]
+
+        print(
+            f"🔍 [{category}] {search_query}"
+        )
+
+        try:
+
+            response = tavily_client.search(
+                query=search_query,
+
+                # Advanced gives better content extraction.
+                search_depth="advanced",
+
+                # 10 results per search.
+                max_results=10,
+
+                # We want raw results, not Tavily's single
+                # generated answer.
+                include_answer=False,
+
+                include_raw_content=True,
+            )
+
+            for result in response.get(
+                "results",
+                []
+            ):
+
+                all_results.append({
+                    "title": result.get(
+                        "title",
+                        ""
+                    ),
+
+                    "content": result.get(
+                        "content",
+                        ""
+                    ),
+
+                    "raw_content": result.get(
+                        "raw_content",
+                        ""
+                    ),
+
+                    "url": result.get(
+                        "url",
+                        ""
+                    ),
+
+                    "score": result.get(
+                        "score",
+                        0
+                    ),
+
+                    "category": category,
+
+                    "search_query": search_query,
+
+                    "source": "tavily",
+                })
+
+        except Exception as e:
+
+            print(
+                f"⚠️ Tavily search failed "
+                f"for [{category}]: {e}"
+            )
+
+    print(
+        f"📊 Raw Tavily results: "
+        f"{len(all_results)}"
+    )
+
+    # ========================================================
+    # DEDUPLICATION
+    # ========================================================
+
+    unique_results = {}
+
+    for result in all_results:
+
+        url = result.get(
+            "url",
+            ""
+        )
+
+        domain = normalize_url(url)
+
+        title = normalize_text(
+            result.get(
+                "title",
+                ""
+            )
+        )
+
+        # Prefer URL/domain as the primary identifier.
+        key = (
+            url.lower().strip()
+            if url
+            else title
+        )
+
+        if not key:
+            continue
+
+        # If the same page appears multiple times,
+        # keep the strongest version.
+        if key not in unique_results:
+
+            unique_results[key] = result
+
+        else:
+
+            existing = unique_results[key]
+
+            if result.get(
+                "score",
+                0
+            ) > existing.get(
+                "score",
+                0
+            ):
+
+                unique_results[key] = result
+
+    results = list(
+        unique_results.values()
+    )
+
+    print(
+        f"📊 Unique results: "
+        f"{len(results)}"
+    )
+
+    # ========================================================
+    # SCORE RESULTS
+    # ========================================================
+
+    for result in results:
+
+        result["relevance"] = calculate_relevance(
+            result,
+            result.get(
+                "category",
+                "VC"
+            ),
+            query,
+        )
+
+    # ========================================================
+    # SORT
+    # ========================================================
+
+    results.sort(
+        key=lambda x: x.get(
+            "relevance",
+            0
+        ),
+        reverse=True,
+    )
+
+    return results
+
+
+# ============================================================
+# BUILD INVESTOR RESULTS
+# ============================================================
+
+def build_investor_results(
+    results: List[Dict[str, Any]],
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+
+    investors = []
+
+    seen_names = set()
+
+    for result in results:
+
+        relevance = result.get(
+            "relevance",
+            0
+        )
+
+        # Don't return weak results.
+        if relevance < 0.35:
+            continue
+
+        name = extract_investor_name(
+            result
+        )
+
+        normalized_name = normalize_name(
+            name
+        )
+
+        if not normalized_name:
+            continue
+
+        if normalized_name in seen_names:
+            continue
+
+        seen_names.add(
+            normalized_name
+        )
+
+        category = result.get(
+            "category",
+            "UNKNOWN"
+        )
+
+        content = result.get(
+            "content",
+            ""
+        )
+
+        # Short evidence snippet.
+        evidence = content[:700]
+
+        investors.append({
+            "name": name,
+
+            "type": category,
+
+            "country": "India",
+
+            "stage": (
+                "Pre-seed / Seed / Early Stage"
+            ),
+
+            "description": (
+                content[:400]
+                if content
+                else ""
+            ),
+
+            "evidence": evidence,
+
+            "confidence": round(
+                min(
+                    relevance / 1.5,
+                    0.99
+                ),
+                2
+            ),
+
+            "relevance": round(
+                relevance,
+                3
+            ),
+
+            "url": result.get(
+                "url",
+                ""
+            ),
+
+            "source": "Tavily",
+
+            "search_query": result.get(
+                "search_query",
+                ""
+            ),
+        })
+
+        if len(investors) >= limit:
+            break
+
+    return investors
+
+
+# ============================================================
+# RESEARCH
+# ============================================================
+
+async def research_query(
+    query: str
+) -> Dict[str, Any]:
+
+    # --------------------------------------------------------
+    # Search
+    # --------------------------------------------------------
+
+    search_results = await search_web(
+        query
+    )
+
+    if not search_results:
+
+        return {
+            "answer": (
+                "No relevant investor results "
+                "were found."
+            ),
+
+            "entities": [],
+
+            "relationships": [],
+
+            "opportunities": [],
+
+            "investors": [],
+
+            "citations": [],
+        }
+
+    # --------------------------------------------------------
+    # Build investors
+    # --------------------------------------------------------
+
+    investors = build_investor_results(
+        search_results,
+        limit=50,
+    )
+
+    # --------------------------------------------------------
+    # Group by category
+    # --------------------------------------------------------
+
+    category_counts = {}
+
+    for investor in investors:
+
+        category = investor.get(
+            "type",
+            "UNKNOWN"
+        )
+
+        category_counts[category] = (
+            category_counts.get(
+                category,
+                0
+            ) + 1
+        )
+
+    # --------------------------------------------------------
+    # Generate human-readable answer
+    # --------------------------------------------------------
+
+    answer_parts = []
+
+    answer_parts.append(
+        f"Found {len(investors)} potentially "
+        f"relevant investor organizations for:"
+    )
+
+    answer_parts.append(
+        f'"{query}"'
+    )
+
+    answer_parts.append("")
+
+    if category_counts:
+
+        answer_parts.append(
+            "Categories found:"
+        )
+
+        for category, count in sorted(
+            category_counts.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        ):
+
+            answer_parts.append(
+                f"- {category}: {count}"
+            )
+
+    answer_parts.append("")
+
+    answer_parts.append(
+        "Top relevant organizations:"
+    )
+
+    for investor in investors[:15]:
+
+        answer_parts.append(
+            f"- {investor['name']} "
+            f"({investor['type']}) "
+            f"[confidence: "
+            f"{investor['confidence']}]"
+        )
+
+    answer = "\n".join(
+        answer_parts
+    )
+
+    # --------------------------------------------------------
+    # Citations
+    # --------------------------------------------------------
+
+    citations = []
+
+    for result in search_results[:30]:
+
+        url = result.get(
+            "url",
+            ""
+        )
+
+        if not url:
+            continue
+
+        citations.append({
+            "source": url,
+
+            "title": result.get(
+                "title",
+                ""
+            ),
+
+            "content": result.get(
+                "content",
+                ""
+            )[:500],
+
+            "relevance": round(
+                result.get(
+                    "relevance",
+                    0
+                ),
+                3,
+            ),
+
+            "category": result.get(
+                "category",
+                ""
+            ),
+        })
+
+    # --------------------------------------------------------
+    # Return
+    # --------------------------------------------------------
+
     return {
-        "entities": [
-            {
-                "name": companies[0],
-                "type": "COMPANY",
-                "normalized_name": companies[0],
-                "description": f"Leading company in {country}",
-                "country": country,
-                "confidence": 0.85,
-                "evidence": "Mock evidence"
-            }
-        ],
+        "answer": answer,
+
+        "entities": investors,
+
         "relationships": [],
-        "opportunities": []
+
+        "opportunities": [],
+
+        "investors": investors,
+
+        "citations": citations,
     }
 
-# ==================== API ENDPOINTS ====================
+
+# ============================================================
+# API
+# ============================================================
 
 @app.post("/api/research")
-async def perform_research(request: ResearchRequest):
-    """Perform research with real search or mock data"""
+async def perform_research(
+    request: ResearchRequest
+):
+
     try:
-        # Check if we should use mock data
-        if USE_MOCK:
-            print("⚠️  Using mock data (API keys not configured)")
-            results = get_mock_extraction(request.query)
-            return {
-                "research_run_id": str(uuid.uuid4()),
-                "status": "completed",
-                "results": {
-                    "query": request.query,
-                    "response": {
-                        "answer": f"Research results for: {request.query}\n\n⚠️ Using mock data. Add OPENAI_API_KEY and TAVILY_API_KEY to .env file for real results.",
-                        **results,
-                        "citations": [{"source": "mock", "content": "Mock data", "relevance": 0.5}]
-                    },
-                    "sources": [{"type": "mock", "content": "Mock source", "relevance": 0.5}]
-                }
-            }
-        
-        # Real search
-        print(f"🔍 Researching: {request.query}")
-        results = await research_query(request.query)
-        
+
+        print(
+            f"🚀 Research request: "
+            f"{request.query}"
+        )
+
+        results = await research_query(
+            request.query
+        )
+
         return {
-            "research_run_id": str(uuid.uuid4()),
+            "research_run_id": str(
+                uuid.uuid4()
+            ),
+
             "status": "completed",
+
             "results": {
                 "query": request.query,
+
                 "response": results,
-                "sources": [
-                    {
-                        "type": "web",
-                        "content": "Real search results",
-                        "relevance": 0.9
-                    }
-                ]
-            }
+
+                "sources": results.get(
+                    "citations",
+                    []
+                ),
+            },
         }
+
     except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+        print(
+            f"❌ Research error: {e}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e),
+        )
+
+
+# ============================================================
+# HEALTH
+# ============================================================
 
 @app.get("/api/health")
 async def health_check():
+
     return {
         "status": "healthy",
-        "mode": "mock" if USE_MOCK else "real",
+
+        "mode": "tavily",
+
         "timestamp": datetime.utcnow().isoformat(),
-        "openai_configured": bool(OPENAI_API_KEY),
-        "tavily_configured": bool(TAVILY_API_KEY)
+
+        "tavily_configured": bool(
+            TAVILY_API_KEY
+        ),
     }
 
+
+# ============================================================
+# ENTITY SEARCH
+# ============================================================
+
 @app.get("/api/entities/search")
-async def search_entities(query: str, limit: int = 10):
-    """Search for entities"""
-    # This would query your PostgreSQL database
-    # For now, return mock results
-    return {
-        "entities": [
-            {"id": "1", "name": "Sample Entity", "type": "COMPANY", "country": "Global"}
-        ]
-    }
+async def search_entities(
+    query: str,
+    limit: int = 10,
+):
+
+    try:
+
+        results = await search_web(
+            query
+        )
+
+        investors = build_investor_results(
+            results,
+            limit=limit,
+        )
+
+        return {
+            "entities": investors
+        }
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e),
+        )
+
+
+# ============================================================
+# ROOT
+# ============================================================
 
 @app.get("/")
 async def root():
+
     return {
         "message": "Connecting the Dots AI",
+
         "docs": "/docs",
+
         "health": "/api/health",
-        "mode": "mock" if USE_MOCK else "real"
+
+        "mode": "tavily",
     }
 
+
+# ============================================================
+# LOCAL DEVELOPMENT
+# ============================================================
+
 if __name__ == "__main__":
+
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+    )
