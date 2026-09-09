@@ -579,42 +579,46 @@ def calculate_relevance(
 # EXTRACT INVESTOR NAME
 # ============================================================
 
-def extract_investor_name(
-    result: Dict[str, Any]
-) -> str:
+def is_list_or_article(title: str) -> bool:
     """
-    Try to obtain an organization name from the page title.
-
-    This is intentionally conservative. It is better to return
-    the page title than invent an investor name.
+    Determine whether a search result is an article,
+    directory, ranking, or list rather than an organization.
     """
 
-    title = result.get("title", "").strip()
+    title = normalize_text(title)
 
-    if not title:
-        return "Unknown organization"
-
-    # Common separators in search-result titles
-    separators = [
-        " | ",
-        " - ",
-        " – ",
-        " — ",
-        ": ",
+    article_patterns = [
+        "top ",
+        "best ",
+        "list of",
+        "lists",
+        "ranking",
+        "rankings",
+        "guide",
+        "directory",
+        "comprehensive list",
+        "firms investing",
+        "firms in india",
+        "investors in india",
+        "investors investing",
+        "funds in india",
+        "funds investing",
+        "companies investing",
+        "who invests",
+        "where to find",
+        "how to find",
+        "review",
+        "report",
+        "market",
+        "2024",
+        "2025",
+        "2026",
     ]
 
-    for separator in separators:
-
-        if separator in title:
-
-            first_part = title.split(
-                separator
-            )[0].strip()
-
-            if 2 <= len(first_part) <= 100:
-                return first_part
-
-    return title[:120]
+    return any(
+        pattern in title
+        for pattern in article_patterns
+    )
 
 
 # ============================================================
@@ -827,18 +831,97 @@ def build_investor_results(
 
     for result in results:
 
+        title = result.get(
+            "title",
+            ""
+        )
+
+        content = result.get(
+            "content",
+            ""
+        )
+
+        url = result.get(
+            "url",
+            ""
+        )
+
         relevance = result.get(
             "relevance",
             0
         )
 
-        # Don't return weak results.
-        if relevance < 0.35:
+        # ----------------------------------------------------
+        # Reject weak results
+        # ----------------------------------------------------
+
+        if relevance < 0.65:
             continue
 
-        name = extract_investor_name(
+        # ----------------------------------------------------
+        # Reject articles/listicles/directories
+        # ----------------------------------------------------
+
+        if is_list_or_article(title):
+            continue
+
+        # ----------------------------------------------------
+        # Require actual investor language
+        # ----------------------------------------------------
+
+        text = normalize_text(
+            f"{title} {content}"
+        )
+
+        investment_terms = [
+            "invest",
+            "investing",
+            "investment",
+            "investments",
+            "portfolio",
+            "funding",
+            "funded",
+            "backs startups",
+            "backing startups",
+        ]
+
+        has_investment_evidence = any(
+            term in text
+            for term in investment_terms
+        )
+
+        if not has_investment_evidence:
+            continue
+
+        # ----------------------------------------------------
+        # Require India relevance
+        # ----------------------------------------------------
+
+        india_terms = [
+            "india",
+            "indian",
+            "india-focused",
+            "india focused",
+        ]
+
+        has_india_evidence = any(
+            term in text
+            for term in india_terms
+        )
+
+        if not has_india_evidence:
+            continue
+
+        # ----------------------------------------------------
+        # Extract organization name
+        # ----------------------------------------------------
+
+        name = extract_organization_from_result(
             result
         )
+
+        if not name:
+            continue
 
         normalized_name = normalize_name(
             name
@@ -854,18 +937,20 @@ def build_investor_results(
             normalized_name
         )
 
-        category = result.get(
-            "category",
-            "UNKNOWN"
+        category = detect_investor_category(
+            text
         )
 
-        content = result.get(
-            "content",
-            ""
+        stage = detect_investment_stage(
+            text
         )
 
-        # Short evidence snippet.
-        evidence = content[:700]
+        confidence = calculate_confidence(
+            text,
+            relevance,
+            category,
+            stage,
+        )
 
         investors.append({
             "name": name,
@@ -874,35 +959,24 @@ def build_investor_results(
 
             "country": "India",
 
-            "stage": (
-                "Pre-seed / Seed / Early Stage"
-            ),
+            "stage": stage,
 
             "description": (
-                content[:400]
+                content[:500]
                 if content
                 else ""
             ),
 
-            "evidence": evidence,
+            "evidence": content[:1000],
 
-            "confidence": round(
-                min(
-                    relevance / 1.5,
-                    0.99
-                ),
-                2
-            ),
+            "confidence": confidence,
 
             "relevance": round(
                 relevance,
-                3
+                3,
             ),
 
-            "url": result.get(
-                "url",
-                ""
-            ),
+            "url": url,
 
             "source": "Tavily",
 
@@ -916,6 +990,257 @@ def build_investor_results(
             break
 
     return investors
+
+def extract_organization_from_result(
+    result: Dict[str, Any]
+) -> Optional[str]:
+    """
+    Extract a likely organization name from a search result.
+
+    We prefer organization-style titles and avoid article titles.
+    """
+
+    title = result.get(
+        "title",
+        ""
+    ).strip()
+
+    content = result.get(
+        "content",
+        ""
+    ).strip()
+
+    # --------------------------------------------------------
+    # First: reject obvious article titles
+    # --------------------------------------------------------
+
+    if is_list_or_article(title):
+        return None
+
+    # --------------------------------------------------------
+    # Clean common title suffixes
+    # --------------------------------------------------------
+
+    separators = [
+        " | ",
+        " - ",
+        " – ",
+        " — ",
+    ]
+
+    cleaned_title = title
+
+    for separator in separators:
+
+        if separator in cleaned_title:
+
+            cleaned_title = (
+                cleaned_title
+                .split(separator)[0]
+                .strip()
+            )
+
+            break
+
+    # --------------------------------------------------------
+    # Avoid obviously generic titles
+    # --------------------------------------------------------
+
+    generic_terms = [
+        "venture capital firms",
+        "venture capital investors",
+        "venture capital funds",
+        "seed investors",
+        "seed funds",
+        "angel investors",
+        "angel investors in india",
+        "investors in india",
+        "startup investors",
+        "startup funding",
+        "venture capital",
+        "investor directory",
+        "investor list",
+    ]
+
+    title_lower = normalize_text(
+        cleaned_title
+    )
+
+    if any(
+        term in title_lower
+        for term in generic_terms
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # Check whether title looks like an organization
+    # --------------------------------------------------------
+
+    if (
+        2 <= len(cleaned_title) <= 100
+        and len(cleaned_title.split()) <= 12
+    ):
+        return cleaned_title
+
+    return None
+
+def detect_investor_category(
+    text: str
+) -> str:
+
+    text = normalize_text(text)
+
+    scores = {
+        "VC": 0,
+        "ANGEL": 0,
+        "ACCELERATOR": 0,
+        "INCUBATOR": 0,
+        "FAMILY_OFFICE": 0,
+        "FOUNDATION": 0,
+        "LP": 0,
+    }
+
+    category_keywords = {
+        "VC": [
+            "venture capital",
+            "venture fund",
+            "vc fund",
+            "venture investor",
+        ],
+
+        "ANGEL": [
+            "angel investor",
+            "angel network",
+            "angel fund",
+            "angel investing",
+        ],
+
+        "ACCELERATOR": [
+            "accelerator",
+            "accelerator program",
+        ],
+
+        "INCUBATOR": [
+            "incubator",
+            "incubation",
+        ],
+
+        "FAMILY_OFFICE": [
+            "family office",
+            "family offices",
+        ],
+
+        "FOUNDATION": [
+            "foundation",
+            "impact foundation",
+        ],
+
+        "LP": [
+            "limited partner",
+            "limited partners",
+            "institutional investor",
+            "fund of funds",
+        ],
+    }
+
+    for category, keywords in category_keywords.items():
+
+        for keyword in keywords:
+
+            if keyword in text:
+                scores[category] += 1
+
+    best_category = max(
+        scores,
+        key=scores.get
+    )
+
+    if scores[best_category] == 0:
+        return "INVESTOR"
+
+    return best_category
+
+def detect_investment_stage(
+    text: str
+) -> str:
+
+    text = normalize_text(text)
+
+    stages = []
+
+    if (
+        "pre-seed" in text
+        or "pre seed" in text
+    ):
+        stages.append("Pre-seed")
+
+    if "seed" in text:
+        stages.append("Seed")
+
+    if (
+        "early stage" in text
+        or "early-stage" in text
+    ):
+        stages.append("Early Stage")
+
+    if not stages:
+        return "Unknown"
+
+    # Remove duplicates while preserving order.
+    return " / ".join(
+        dict.fromkeys(stages)
+    )
+
+def calculate_confidence(
+    text: str,
+    relevance: float,
+    category: str,
+    stage: str,
+) -> float:
+
+    confidence = 0.30
+
+    # Tavily relevance
+    confidence += min(
+        relevance * 0.30,
+        0.30
+    )
+
+    # Investor category
+    if category != "INVESTOR":
+        confidence += 0.15
+
+    # Stage evidence
+    if stage != "Unknown":
+        confidence += 0.10
+
+    # Investment evidence
+    if any(
+        term in text
+        for term in [
+            "invested",
+            "investing",
+            "investment",
+            "portfolio",
+            "funding",
+        ]
+    ):
+        confidence += 0.10
+
+    # India evidence
+    if any(
+        term in text
+        for term in [
+            "india",
+            "indian",
+        ]
+    ):
+        confidence += 0.05
+
+    return round(
+        min(confidence, 0.99),
+        2
+    )
 
 
 # ============================================================
