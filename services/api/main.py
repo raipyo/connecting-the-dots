@@ -173,6 +173,38 @@ def generate_search_queries(user_query: str) -> List[Dict[str, str]]:
         ),
     })
 
+    queries.append({
+        "category": "VC",
+        "query": (
+            f"{geography} venture capital firm "
+            f"{stage} investments portfolio"
+        ),
+    })
+
+    queries.append({
+        "category": "VC",
+        "query": (
+            f"{geography} VC fund "
+            f"{stage} portfolio companies"
+        ),
+    })
+
+    queries.append({
+        "category": "VC",
+        "query": (
+            f"site:.vc {geography} startup investor "
+            f"{stage}"
+        ),
+    })
+
+    queries.append({
+        "category": "VC",
+        "query": (
+            f"venture capital firm India "
+            f"our portfolio {stage}"
+        ),
+    })
+
     # --------------------------------------------------------
     # ANGELS
     # --------------------------------------------------------
@@ -201,6 +233,22 @@ def generate_search_queries(user_query: str) -> List[Dict[str, str]]:
         ),
     })
 
+    queries.append({
+        "category": "ANGEL",
+        "query": (
+            f"angel investor India "
+            f"portfolio startups {stage}"
+        ),
+    })
+
+    queries.append({
+        "category": "ANGEL",
+        "query": (
+            f"angel network India "
+            f"investment portfolio startups"
+        ),
+    })
+
     # --------------------------------------------------------
     # ACCELERATORS
     # --------------------------------------------------------
@@ -221,6 +269,22 @@ def generate_search_queries(user_query: str) -> List[Dict[str, str]]:
         ),
     })
 
+    queries.append({
+        "category": "ACCELERATOR",
+        "query": (
+            f"startup accelerator India "
+            f"portfolio investment funding"
+        ),
+    })
+
+    queries.append({
+        "category": "ACCELERATOR",
+        "query": (
+            f"India accelerator program "
+            f"invests in startups"
+        ),
+    })
+
     # --------------------------------------------------------
     # INCUBATORS
     # --------------------------------------------------------
@@ -238,6 +302,14 @@ def generate_search_queries(user_query: str) -> List[Dict[str, str]]:
         "query": (
             f"{geography} technology incubators "
             f"early stage startup funding"
+        ),
+    })
+
+    queries.append({
+        "category": "INCUBATOR",
+        "query": (
+            f"startup incubator India "
+            f"portfolio funding investment"
         ),
     })
 
@@ -308,17 +380,15 @@ def generate_search_queries(user_query: str) -> List[Dict[str, str]]:
 # TEXT HELPERS
 # ============================================================
 
-def normalize_text(text: str) -> str:
-    if not text:
+def normalize_text(text: Any) -> str:
+    if text is None:
         return ""
 
-    text = text.lower()
+    if not isinstance(text, str):
+        text = str(text)
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
+    text = text.lower()
+    text = re.sub(r"\s+", " ", text)
 
     return text.strip()
 
@@ -379,18 +449,21 @@ def calculate_relevance(
     """
 
     title = normalize_text(
-        result.get("title", "")
+        result.get("title", "") or ""
     )
 
     content = normalize_text(
-        result.get("content", "")
+        result.get("content", "") or ""
     )
 
     text = f"{title} {content}"
 
-    tavily_score = float(
-        result.get("score", 0)
-    )
+    try:
+        tavily_score = float(
+            result.get("score") or 0
+        )
+    except (TypeError, ValueError):
+        tavily_score = 0.0
 
     # Start with Tavily score.
     score = tavily_score
@@ -581,11 +654,15 @@ def calculate_relevance(
 
 def is_list_or_article(title: str) -> bool:
     """
-    Determine whether a search result is an article,
-    directory, ranking, or list rather than an organization.
+    Determine whether a search result title is likely to be
+    an article, ranking, directory, listicle, or search page
+    rather than an individual organization.
     """
 
     title = normalize_text(title)
+
+    if not title:
+        return True
 
     article_patterns = [
         "top ",
@@ -604,20 +681,146 @@ def is_list_or_article(title: str) -> bool:
         "funds in india",
         "funds investing",
         "companies investing",
+        "companies in india",
         "who invests",
         "where to find",
         "how to find",
         "review",
         "report",
         "market",
+        "comparison",
+        "compare",
+        "ultimate guide",
+        "complete guide",
+        "investment guide",
+        "startup funding guide",
+        "venture capital guide",
+        "venture capital firms",
+        "venture capital investors",
+        "venture capital funds",
+        "seed investors",
+        "seed funds",
+        "angel investors",
+        "startup investors",
+        "investors investing in",
+        "investing in india",
+        "funding startups in india",
+        "2023",
         "2024",
         "2025",
         "2026",
     ]
 
-    return any(
+    if any(
         pattern in title
         for pattern in article_patterns
+    ):
+        return True
+
+    # Question-style titles are almost never organizations.
+    if title.endswith("?"):
+        return True
+
+    # Very long titles are usually article headings.
+    if len(title.split()) > 12:
+        return True
+
+    return False
+
+def calculate_source_quality(
+    result: Dict[str, Any],
+) -> float:
+    """
+    Estimate whether the result is likely to be an
+    organization page rather than an article/listicle.
+    """
+
+    title = normalize_text(
+        result.get("title") or ""
+    )
+
+    content = normalize_text(
+        result.get("content") or ""
+    )
+
+    url = result.get("url") or ""
+
+    score = 0.0
+
+    # Official-looking title.
+    if not is_list_or_article(title):
+        score += 0.20
+
+    # Strong organization language.
+    explicit_terms = [
+        "is a venture capital firm",
+        "is a venture fund",
+        "is an investment firm",
+        "we invest in",
+        "we back",
+        "our portfolio",
+        "our investments",
+        "our team",
+    ]
+
+    for term in explicit_terms:
+        if term in content:
+            score += 0.15
+
+    # Strong category language.
+    category_terms = [
+        "venture capital",
+        "angel investor",
+        "accelerator",
+        "incubator",
+        "family office",
+        "impact investor",
+    ]
+
+    for term in category_terms:
+        if term in content:
+            score += 0.05
+
+    # Organization/about language.
+    organization_terms = [
+        "about us",
+        "about",
+        "portfolio",
+        "team",
+        "investment thesis",
+        "our mission",
+        "our approach",
+    ]
+
+    for term in organization_terms:
+        if term in content:
+            score += 0.04
+
+    # Penalize obvious third-party list/article pages.
+    bad_domains = [
+        "linkedin.com",
+        "crunchbase.com",
+        "tracxn.com",
+        "medium.com",
+        "forbes.com",
+        "inc42.com",
+        "yourstory.com",
+    ]
+
+    try:
+        domain = urlparse(url).netloc.lower()
+    except Exception:
+        domain = ""
+
+    if any(
+        bad_domain in domain
+        for bad_domain in bad_domains
+    ):
+        score -= 0.10
+
+    return max(
+        0.0,
+        min(score, 1.0)
     )
 
 
@@ -681,35 +884,13 @@ async def search_web(
             ):
 
                 all_results.append({
-                    "title": result.get(
-                        "title",
-                        ""
-                    ),
-
-                    "content": result.get(
-                        "content",
-                        ""
-                    ),
-
-                    "raw_content": result.get(
-                        "raw_content",
-                        ""
-                    ),
-
-                    "url": result.get(
-                        "url",
-                        ""
-                    ),
-
-                    "score": result.get(
-                        "score",
-                        0
-                    ),
-
+                    "title": result.get("title") or "",
+                    "content": result.get("content") or "",
+                    "raw_content": result.get("raw_content") or "",
+                    "url": result.get("url") or "",
+                    "score": result.get("score") or 0,
                     "category": category,
-
                     "search_query": search_query,
-
                     "source": "tavily",
                 })
 
@@ -790,16 +971,37 @@ async def search_web(
     # SCORE RESULTS
     # ========================================================
 
-    for result in results:
+    for index, result in enumerate(results):
+        try:
+            try:
+                result["relevance"] = calculate_relevance(
+                    result,
+                    result.get("category") or "VC",
+                    query,
+                )
+            except Exception as e:
+                print(
+                    f"⚠️ Failed to score result #{index}: {e}"
+                )
+                print(
+                    f"   URL: {result.get('url') or ''}"
+                )
+                print(
+                    f"   Title: {result.get('title') or ''}"
+                )
 
-        result["relevance"] = calculate_relevance(
-            result,
-            result.get(
-                "category",
-                "VC"
-            ),
-            query,
-        )
+                result["relevance"] = 0.0
+        except Exception as e:
+            print(
+                f"⚠️ Failed to process result #{index}: {e}"
+            )
+            print(
+                f"   Title: {result.get('title') or ''}"
+            )
+            print(
+                f"   URL: {result.get('url') or ''}"
+            )
+            continue
 
     # ========================================================
     # SORT
@@ -831,47 +1033,42 @@ def build_investor_results(
 
     for result in results:
 
-        title = result.get(
-            "title",
-            ""
-        )
-
-        content = result.get(
-            "content",
-            ""
-        )
-
-        url = result.get(
-            "url",
-            ""
-        )
-
-        relevance = result.get(
-            "relevance",
-            0
+        title = result.get("title") or ""
+        content = result.get("content") or ""
+        raw_content = result.get("raw_content") or ""
+        url = result.get("url") or ""
+        relevance = float(
+            result.get(
+                "relevance",
+                0
+            )
         )
 
         # ----------------------------------------------------
-        # Reject weak results
+        # Reject weak search results
         # ----------------------------------------------------
 
         if relevance < 0.65:
             continue
 
         # ----------------------------------------------------
-        # Reject articles/listicles/directories
+        # Reject article/listicle headings
         # ----------------------------------------------------
 
         if is_list_or_article(title):
             continue
 
         # ----------------------------------------------------
-        # Require actual investor language
+        # Combined evidence
         # ----------------------------------------------------
 
         text = normalize_text(
-            f"{title} {content}"
+            f"{title} {content} {raw_content[:8000]}"
         )
+
+        # ----------------------------------------------------
+        # Require investment evidence
+        # ----------------------------------------------------
 
         investment_terms = [
             "invest",
@@ -883,6 +1080,8 @@ def build_investor_results(
             "funded",
             "backs startups",
             "backing startups",
+            "invests in",
+            "investing in",
         ]
 
         has_investment_evidence = any(
@@ -913,7 +1112,7 @@ def build_investor_results(
             continue
 
         # ----------------------------------------------------
-        # Extract organization name
+        # Extract ACTUAL organization
         # ----------------------------------------------------
 
         name = extract_organization_from_result(
@@ -923,6 +1122,10 @@ def build_investor_results(
         if not name:
             continue
 
+        name = clean_organization_name(
+            name
+        )
+
         normalized_name = normalize_name(
             name
         )
@@ -930,12 +1133,21 @@ def build_investor_results(
         if not normalized_name:
             continue
 
+        if looks_like_generic_organization(
+            name
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # Deduplicate organizations, not URLs
+        # ----------------------------------------------------
+
         if normalized_name in seen_names:
             continue
 
-        seen_names.add(
-            normalized_name
-        )
+        # ----------------------------------------------------
+        # Category / stage
+        # ----------------------------------------------------
 
         category = detect_investor_category(
             text
@@ -945,6 +1157,18 @@ def build_investor_results(
             text
         )
 
+        # ----------------------------------------------------
+        # Source quality
+        # ----------------------------------------------------
+
+        source_quality = calculate_source_quality(
+            result
+        )
+
+        # ----------------------------------------------------
+        # Confidence
+        # ----------------------------------------------------
+
         confidence = calculate_confidence(
             text,
             relevance,
@@ -952,8 +1176,52 @@ def build_investor_results(
             stage,
         )
 
+        # Increase confidence when the page itself
+        # explicitly identifies an organization.
+        explicit_org = (
+            extract_explicit_organization_from_content(
+                content + "\n" + raw_content[:8000]
+            )
+        )
+
+        if explicit_org:
+            confidence += 0.10
+
+        # Source quality contributes to confidence.
+        confidence += source_quality * 0.10
+
+        confidence = round(
+            min(confidence, 0.99),
+            2
+        )
+
+        seen_names.add(
+            normalized_name
+        )
+
+        # ----------------------------------------------------
+        # Description
+        # ----------------------------------------------------
+
+        description = (
+            content[:500]
+            if content
+            else ""
+        )
+
+        evidence = (
+            content[:1000]
+            if content
+            else raw_content[:1000]
+        )
+
         investors.append({
+
+            # Actual organization name.
             "name": name,
+
+            # Frontend already expects this.
+            "normalized_name": normalized_name,
 
             "type": category,
 
@@ -961,18 +1229,19 @@ def build_investor_results(
 
             "stage": stage,
 
-            "description": (
-                content[:500]
-                if content
-                else ""
-            ),
+            "description": description,
 
-            "evidence": content[:1000],
+            "evidence": evidence,
 
             "confidence": confidence,
 
             "relevance": round(
                 relevance,
+                3,
+            ),
+
+            "source_quality": round(
+                source_quality,
                 3,
             ),
 
@@ -991,96 +1260,430 @@ def build_investor_results(
 
     return investors
 
+# ============================================================
+# ORGANIZATION EXTRACTION
+# ============================================================
+
+GENERIC_ORGANIZATION_NAMES = {
+    "venture capital",
+    "venture capital firms",
+    "venture capital investors",
+    "venture capital funds",
+    "vc funds",
+    "vc investors",
+    "seed investors",
+    "seed funds",
+    "angel investors",
+    "angel investors in india",
+    "investors in india",
+    "startup investors",
+    "startup funding",
+    "startup investors in india",
+    "investor directory",
+    "investor list",
+    "investment firms",
+    "investment funds",
+    "funding firms",
+    "venture investors",
+    "early stage investors",
+    "early-stage investors",
+    "accelerators in india",
+    "startup accelerators in india",
+    "startup incubators in india",
+}
+
+
+def clean_organization_name(name: str) -> str:
+    """
+    Clean an extracted organization name without destroying
+    legitimate company names.
+    """
+
+    if not name:
+        return ""
+
+    name = name.strip()
+
+    # Remove surrounding punctuation.
+    name = re.sub(r'^[\s\-–—|:;,]+', '', name)
+    name = re.sub(r'[\s\-–—|:;,]+$', '', name)
+
+    # Remove common sentence endings.
+    name = re.sub(
+        r'\s+(is|are|was|were|has|have|provides|offers|invests).*$',
+        '',
+        name,
+        flags=re.IGNORECASE,
+    )
+
+    # Collapse whitespace.
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    return name
+
+
+def looks_like_generic_organization(name: str) -> bool:
+    """
+    Reject names that are actually search headings,
+    article titles, categories, or generic descriptions.
+    """
+
+    normalized = normalize_name(name)
+
+    if not normalized:
+        return True
+
+    if normalized in GENERIC_ORGANIZATION_NAMES:
+        return True
+
+    generic_patterns = [
+        r'^top\s+',
+        r'^best\s+',
+        r'^list\s+of\s+',
+        r'^list\s*:',
+        r'^ranking',
+        r'^rankings',
+        r'^guide\s+to\s+',
+        r'^directory',
+        r'^how\s+to\s+',
+        r'^where\s+to\s+',
+        r'^who\s+',
+        r'^investors?\s+in\s+',
+        r'^venture\s+capital\s+firms?\s+',
+        r'^venture\s+capital\s+investors?\s+',
+        r'^venture\s+capital\s+funds?\s+',
+        r'^seed\s+investors?\s+',
+        r'^seed\s+funds?\s+',
+        r'^angel\s+investors?\s+',
+        r'^startup\s+investors?\s+',
+        r'^startup\s+funding',
+        r'^funds?\s+investing\s+',
+        r'^firms?\s+investing\s+',
+        r'\bin\s+india$',
+        r'\bfor\s+startups$',
+        r'\bstartup\s+funding$',
+    ]
+
+    return any(
+        re.search(pattern, normalized)
+        for pattern in generic_patterns
+    )
+
+
+def is_probable_organization_name(name: str) -> bool:
+    """
+    Determine whether a candidate looks like an actual
+    organization rather than an article/search heading.
+    """
+
+    if not name:
+        return False
+
+    name = clean_organization_name(name)
+
+    if not name:
+        return False
+
+    if looks_like_generic_organization(name):
+        return False
+
+    words = name.split()
+
+    if len(name) < 2 or len(name) > 100:
+        return False
+
+    if len(words) > 12:
+        return False
+
+    # Reject obvious sentence-like candidates.
+    sentence_words = {
+        "the",
+        "top",
+        "best",
+        "list",
+        "investing",
+        "investors",
+        "firms",
+        "funds",
+        "companies",
+        "startups",
+        "india",
+        "guide",
+        "directory",
+        "ranking",
+    }
+
+    sentence_word_count = sum(
+        1
+        for word in words
+        if normalize_name(word) in sentence_words
+    )
+
+    if sentence_word_count >= 3:
+        return False
+
+    return True
+
+
+def extract_domain_name(url: str) -> str:
+    """
+    Extract a human-readable brand candidate from the domain.
+
+    Example:
+        https://www.blume.vc/portfolio
+        -> Blume
+
+    This is only a fallback. It is NOT considered strong
+    evidence by itself.
+    """
+
+    if not url:
+        return ""
+
+    try:
+        parsed = urlparse(url)
+
+        hostname = (
+            parsed.netloc
+            .lower()
+            .replace("www.", "")
+        )
+
+        if not hostname:
+            return ""
+
+        domain_parts = hostname.split(".")
+
+        if not domain_parts:
+            return ""
+
+        brand = domain_parts[0]
+
+        # Handle domains such as:
+        # accel.com
+        # blume.vc
+        # example.co.in
+        if brand in {
+            "blog",
+            "news",
+            "www",
+            "invest",
+            "about",
+            "www2",
+        }:
+            return ""
+
+        return brand.replace("-", " ").replace("_", " ").title()
+
+    except Exception:
+        return ""
+
+
+def extract_explicit_organization_from_content(
+    content: str,
+) -> Optional[str]:
+    """
+    Extract organization names from explicit sentences in
+    the page content.
+
+    Examples:
+
+        "Blume Ventures is a venture capital firm..."
+
+        "Accel is a global venture capital firm..."
+
+        "Peak XV Partners invests in early-stage startups..."
+
+    This is much safer than using the search result title.
+    """
+
+    if not content:
+        return None
+
+    # Limit the amount of text we inspect.
+    text = content[:12000].strip()
+
+    patterns = [
+        # "Blume Ventures is a venture capital firm"
+        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
+        r'is\s+(?:an?|the)\s+'
+        r'(?:venture capital|vc|investment|angel|startup|'
+        r'accelerator|incubator|private equity|impact)\b',
+
+        # "Blume Ventures is one of..."
+        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
+        r'is\s+one\s+of\s+',
+
+        # "Blume Ventures invests in..."
+        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
+        r'(?:invests|invested|investing)\s+'
+        r'(?:in|into)\b',
+
+        # "Blume Ventures focuses on..."
+        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
+        r'(?:focuses|specializes|specialises)\s+on\b',
+
+        # "Founded in 2010, Blume Ventures..."
+        r'\b(?:founded|established|launched)\s+'
+        r'(?:in\s+\d{4}\s*,?\s*)?'
+        r'([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)'
+        r'(?:,|\s+is|\s+was)\b',
+    ]
+
+    for pattern in patterns:
+        try:
+            matches = re.findall(
+                pattern,
+                text,
+                flags=re.IGNORECASE,
+            )
+        except Exception:
+            continue
+
+        for match in matches:
+            if isinstance(match, str):
+                candidate = match
+            elif isinstance(match, tuple) and match:
+                candidate = match[0]
+            else:
+                continue
+
+            candidate = clean_organization_name(candidate)
+
+            if not is_probable_organization_name(candidate):
+                continue
+
+            normalized = normalize_name(candidate)
+
+            if normalized in GENERIC_ORGANIZATION_NAMES:
+                continue
+
+            return candidate
+
+    return None
+
+
 def extract_organization_from_result(
     result: Dict[str, Any]
 ) -> Optional[str]:
     """
-    Extract a likely organization name from a search result.
+    Extract the actual organization represented by a
+    search result.
 
-    We prefer organization-style titles and avoid article titles.
+    Priority:
+
+    1. Explicit organization statement in page content
+    2. Strong organization-style title
+    3. Domain brand as a weak fallback
+
+    We NEVER blindly trust a generic search-result heading.
     """
 
-    title = result.get(
-        "title",
-        ""
+    title = (
+        result.get("title", "")
+        or ""
     ).strip()
 
-    content = result.get(
-        "content",
-        ""
+    content = (
+        result.get("content", "")
+        or ""
+    ).strip()
+
+    raw_content = (
+        result.get("raw_content", "")
+        or ""
+    ).strip()
+
+    url = (
+        result.get("url", "")
+        or ""
     ).strip()
 
     # --------------------------------------------------------
-    # First: reject obvious article titles
+    # 1. Never use obvious article/listicle titles.
     # --------------------------------------------------------
 
     if is_list_or_article(title):
-        return None
+        title_candidate = None
+    else:
+        title_candidate = clean_organization_name(
+            title
+        )
 
     # --------------------------------------------------------
-    # Clean common title suffixes
+    # 2. Strongest signal:
+    # explicit organization name in page content.
     # --------------------------------------------------------
 
-    separators = [
-        " | ",
-        " - ",
-        " – ",
-        " — ",
-    ]
-
-    cleaned_title = title
-
-    for separator in separators:
-
-        if separator in cleaned_title:
-
-            cleaned_title = (
-                cleaned_title
-                .split(separator)[0]
-                .strip()
-            )
-
-            break
-
-    # --------------------------------------------------------
-    # Avoid obviously generic titles
-    # --------------------------------------------------------
-
-    generic_terms = [
-        "venture capital firms",
-        "venture capital investors",
-        "venture capital funds",
-        "seed investors",
-        "seed funds",
-        "angel investors",
-        "angel investors in india",
-        "investors in india",
-        "startup investors",
-        "startup funding",
-        "venture capital",
-        "investor directory",
-        "investor list",
-    ]
-
-    title_lower = normalize_text(
-        cleaned_title
+    combined_content = (
+        content
+        + "\n"
+        + raw_content[:10000]
     )
 
-    if any(
-        term in title_lower
-        for term in generic_terms
-    ):
-        return None
+    explicit_name = (
+        extract_explicit_organization_from_content(
+            combined_content
+        )
+    )
+
+    if explicit_name:
+        return explicit_name
 
     # --------------------------------------------------------
-    # Check whether title looks like an organization
+    # 3. Use title only if it looks like an actual
+    # organization name.
     # --------------------------------------------------------
 
     if (
-        2 <= len(cleaned_title) <= 100
-        and len(cleaned_title.split()) <= 12
+        title_candidate
+        and is_probable_organization_name(
+            title_candidate
+        )
     ):
-        return cleaned_title
+        return title_candidate
+
+    # --------------------------------------------------------
+    # 4. Weak fallback:
+    # derive a brand from the domain.
+    #
+    # Only use this when the page contains strong
+    # investment evidence.
+    # --------------------------------------------------------
+
+    text = normalize_text(
+        f"{title} {content} {raw_content[:5000]}"
+    )
+
+    investment_terms = [
+        "venture capital",
+        "venture fund",
+        "vc fund",
+        "angel investor",
+        "angel investing",
+        "invests in",
+        "investing in",
+        "portfolio",
+        "startup investment",
+        "startup funding",
+        "accelerator",
+        "incubator",
+        "family office",
+        "impact investor",
+    ]
+
+    has_investment_evidence = any(
+        term in text
+        for term in investment_terms
+    )
+
+    if has_investment_evidence:
+        domain_name = extract_domain_name(url)
+
+        if is_probable_organization_name(
+            domain_name
+        ):
+            return domain_name
 
     return None
 
@@ -1343,14 +1946,14 @@ async def research_query(
     answer_parts.append("")
 
     answer_parts.append(
-        "Top relevant organizations:"
+        "Organizations identified from the search evidence:"
     )
 
     for investor in investors[:15]:
-
         answer_parts.append(
             f"- {investor['name']} "
-            f"({investor['type']}) "
+            f"({investor['type']}, "
+            f"{investor['stage']}) "
             f"[confidence: "
             f"{investor['confidence']}]"
         )
