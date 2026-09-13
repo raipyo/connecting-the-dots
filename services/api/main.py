@@ -1,8 +1,9 @@
 import os
 import re
 import uuid
+import asyncio
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from tavily import TavilyClient
+from exa_py import Exa
 
 
 # ============================================================
@@ -18,8 +20,15 @@ from tavily import TavilyClient
 
 load_dotenv()
 
-app = FastAPI(title="Connecting the Dots AI")
+app = FastAPI(
+    title="Connecting the Dots AI",
+    version="2.0.0",
+)
 
+
+# ============================================================
+# CORS
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,19 +44,37 @@ app.add_middleware(
 
 
 # ============================================================
-# TAVILY
+# API KEYS
 # ============================================================
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+EXA_API_KEY = os.getenv("EXA_API_KEY")
+
 
 if not TAVILY_API_KEY:
     raise RuntimeError(
         "TAVILY_API_KEY is not configured. "
-        "Add it to your .env file."
+        "Add it to your environment variables."
     )
+
+
+if not EXA_API_KEY:
+    raise RuntimeError(
+        "EXA_API_KEY is not configured. "
+        "Add it to your environment variables."
+    )
+
+
+# ============================================================
+# CLIENTS
+# ============================================================
 
 tavily_client = TavilyClient(
     api_key=TAVILY_API_KEY
+)
+
+exa_client = Exa(
+    api_key=EXA_API_KEY
 )
 
 
@@ -67,38 +94,45 @@ class ResearchRequest(BaseModel):
 INVESTOR_CATEGORIES = {
     "VC": [
         "venture capital",
-        "VC fund",
+        "venture capital firm",
         "venture fund",
+        "vc fund",
         "startup investor",
     ],
+
     "ANGEL": [
         "angel investor",
         "angel network",
         "angel investing",
         "angel fund",
     ],
+
     "ACCELERATOR": [
         "startup accelerator",
         "accelerator",
         "accelerator program",
     ],
+
     "INCUBATOR": [
         "startup incubator",
         "incubator",
         "incubation",
     ],
+
     "FAMILY_OFFICE": [
         "family office",
         "family offices",
     ],
+
     "FOUNDATION": [
         "foundation",
         "impact foundation",
         "philanthropic investor",
     ],
+
     "LP": [
         "limited partner",
-        "LP investor",
+        "limited partners",
         "institutional investor",
         "fund of funds",
     ],
@@ -106,299 +140,96 @@ INVESTOR_CATEGORIES = {
 
 
 # ============================================================
-# SEARCH QUERY GENERATION
+# GENERIC ORGANIZATION NAMES
 # ============================================================
 
-def generate_search_queries(user_query: str) -> List[Dict[str, str]]:
-    """
-    Turn one broad user query into multiple focused searches.
+GENERIC_ORGANIZATION_NAMES = {
+    "venture capital",
+    "venture capital firms",
+    "venture capital investors",
+    "venture capital funds",
+    "vc funds",
+    "vc investors",
+    "seed investors",
+    "seed funds",
+    "angel investors",
+    "angel investors in india",
+    "investors in india",
+    "startup investors",
+    "startup funding",
+    "startup investors in india",
+    "investor directory",
+    "investor list",
+    "investment firms",
+    "investment funds",
+    "funding firms",
+    "venture investors",
+    "early stage investors",
+    "early-stage investors",
+    "accelerators in india",
+    "startup accelerators in india",
+    "startup incubators in india",
+    "investors",
+    "investment companies",
+    "venture firms",
+    "fund managers",
+    "startup funds",
+}
 
-    This is the most important improvement over the original
-    implementation.
-    """
 
-    query = user_query.lower()
+# ============================================================
+# PROVIDER LIMITS
+# ============================================================
 
-    queries = []
+# Exa is used for broad semantic discovery.
+EXA_MAX_RESULTS = 8
 
-    # --------------------------------------------------------
-    # Detect geography
-    # --------------------------------------------------------
+# Only verify the strongest candidates with Tavily.
+MAX_CANDIDATES_TO_VERIFY = 12
 
-    geography = "India"
+# Tavily searches per candidate.
+MAX_TAVILY_VERIFICATION_SEARCHES = 2
 
-    if "india" in query or "indian" in query:
-        geography = "India"
-
-    # --------------------------------------------------------
-    # Detect investment stage
-    # --------------------------------------------------------
-
-    stage = "early stage"
-
-    if "pre-seed" in query or "pre seed" in query:
-        stage = "pre-seed"
-
-    elif "seed" in query:
-        stage = "seed"
-
-    elif "early stage" in query or "early-stage" in query:
-        stage = "early stage"
-
-    # --------------------------------------------------------
-    # VC
-    # --------------------------------------------------------
-
-    queries.append({
-        "category": "VC",
-        "query": (
-            f"venture capital firms investing in {geography} "
-            f"startups at {stage}"
-        ),
-    })
-
-    queries.append({
-        "category": "VC",
-        "query": (
-            f"{geography} VC funds "
-            f"pre-seed seed early stage startup investors"
-        ),
-    })
-
-    queries.append({
-        "category": "VC",
-        "query": (
-            f"venture capital investors "
-            f"backing {geography} startups {stage}"
-        ),
-    })
-
-    queries.append({
-        "category": "VC",
-        "query": (
-            f"{geography} venture capital firm "
-            f"{stage} investments portfolio"
-        ),
-    })
-
-    queries.append({
-        "category": "VC",
-        "query": (
-            f"{geography} VC fund "
-            f"{stage} portfolio companies"
-        ),
-    })
-
-    queries.append({
-        "category": "VC",
-        "query": (
-            f"site:.vc {geography} startup investor "
-            f"{stage}"
-        ),
-    })
-
-    queries.append({
-        "category": "VC",
-        "query": (
-            f"venture capital firm India "
-            f"our portfolio {stage}"
-        ),
-    })
-
-    # --------------------------------------------------------
-    # ANGELS
-    # --------------------------------------------------------
-
-    queries.append({
-        "category": "ANGEL",
-        "query": (
-            f"angel investors investing in {geography} "
-            f"startups {stage}"
-        ),
-    })
-
-    queries.append({
-        "category": "ANGEL",
-        "query": (
-            f"angel investor networks in {geography} "
-            f"startup funding pre-seed seed"
-        ),
-    })
-
-    queries.append({
-        "category": "ANGEL",
-        "query": (
-            f"{geography} angel investors "
-            f"portfolio startups early stage"
-        ),
-    })
-
-    queries.append({
-        "category": "ANGEL",
-        "query": (
-            f"angel investor India "
-            f"portfolio startups {stage}"
-        ),
-    })
-
-    queries.append({
-        "category": "ANGEL",
-        "query": (
-            f"angel network India "
-            f"investment portfolio startups"
-        ),
-    })
-
-    # --------------------------------------------------------
-    # ACCELERATORS
-    # --------------------------------------------------------
-
-    queries.append({
-        "category": "ACCELERATOR",
-        "query": (
-            f"startup accelerators in {geography} "
-            f"investing pre-seed seed startups"
-        ),
-    })
-
-    queries.append({
-        "category": "ACCELERATOR",
-        "query": (
-            f"{geography} accelerators "
-            f"provide funding investment startups"
-        ),
-    })
-
-    queries.append({
-        "category": "ACCELERATOR",
-        "query": (
-            f"startup accelerator India "
-            f"portfolio investment funding"
-        ),
-    })
-
-    queries.append({
-        "category": "ACCELERATOR",
-        "query": (
-            f"India accelerator program "
-            f"invests in startups"
-        ),
-    })
-
-    # --------------------------------------------------------
-    # INCUBATORS
-    # --------------------------------------------------------
-
-    queries.append({
-        "category": "INCUBATOR",
-        "query": (
-            f"startup incubators in {geography} "
-            f"provide funding investment"
-        ),
-    })
-
-    queries.append({
-        "category": "INCUBATOR",
-        "query": (
-            f"{geography} technology incubators "
-            f"early stage startup funding"
-        ),
-    })
-
-    queries.append({
-        "category": "INCUBATOR",
-        "query": (
-            f"startup incubator India "
-            f"portfolio funding investment"
-        ),
-    })
-
-    # --------------------------------------------------------
-    # FAMILY OFFICES
-    # --------------------------------------------------------
-
-    queries.append({
-        "category": "FAMILY_OFFICE",
-        "query": (
-            f"family offices investing in {geography} "
-            f"startups early stage"
-        ),
-    })
-
-    queries.append({
-        "category": "FAMILY_OFFICE",
-        "query": (
-            f"{geography} family offices "
-            f"venture capital startup investments"
-        ),
-    })
-
-    # --------------------------------------------------------
-    # FOUNDATIONS / IMPACT
-    # --------------------------------------------------------
-
-    queries.append({
-        "category": "FOUNDATION",
-        "query": (
-            f"foundations investing in {geography} "
-            f"startups impact early stage"
-        ),
-    })
-
-    queries.append({
-        "category": "FOUNDATION",
-        "query": (
-            f"impact investors funding {geography} "
-            f"early stage startups"
-        ),
-    })
-
-    # --------------------------------------------------------
-    # LP / INSTITUTIONAL
-    # --------------------------------------------------------
-
-    queries.append({
-        "category": "LP",
-        "query": (
-            f"institutional investors limited partners "
-            f"investing in {geography} venture capital funds"
-        ),
-    })
-
-    queries.append({
-        "category": "LP",
-        "query": (
-            f"LP investors backing {geography} "
-            f"venture capital funds"
-        ),
-    })
-
-    return queries
+# Tavily result count per verification query.
+TAVILY_MAX_RESULTS = 5
 
 
 # ============================================================
 # TEXT HELPERS
 # ============================================================
 
-def normalize_text(text: Any) -> str:
-    if text is None:
+def normalize_text(value: Any) -> str:
+    if value is None:
         return ""
 
-    if not isinstance(text, str):
-        text = str(text)
+    if not isinstance(value, str):
+        value = str(value)
 
-    text = text.lower()
-    text = re.sub(r"\s+", " ", text)
+    value = value.lower()
+    value = re.sub(r"\s+", " ", value)
 
-    return text.strip()
+    return value.strip()
+
+
+def normalize_name(name: str) -> str:
+    name = normalize_text(name)
+
+    name = re.sub(
+        r"[^a-z0-9\s]",
+        "",
+        name,
+    )
+
+    name = re.sub(
+        r"\s+",
+        " ",
+        name,
+    )
+
+    return name.strip()
 
 
 def normalize_url(url: str) -> str:
-    """
-    Normalize URLs so multiple pages from the same website
-    are easier to deduplicate.
-    """
-
     if not url:
         return ""
 
@@ -417,248 +248,45 @@ def normalize_url(url: str) -> str:
         return url.lower().strip()
 
 
-def normalize_name(name: str) -> str:
-    name = normalize_text(name)
+def clean_organization_name(name: str) -> str:
+    if not name:
+        return ""
+
+    name = name.strip()
 
     name = re.sub(
-        r"[^a-z0-9\s]",
+        r"^[\s\-–—|:;,]+",
         "",
-        name
+        name,
     )
 
-    return re.sub(
+    name = re.sub(
+        r"[\s\-–—|:;,]+$",
+        "",
+        name,
+    )
+
+    name = re.sub(
+        r"\s+(is|are|was|were|has|have|provides|offers|invests).*$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+
+    name = re.sub(
         r"\s+",
         " ",
-        name
+        name,
     ).strip()
 
-
-# ============================================================
-# RELEVANCE SCORING
-# ============================================================
-
-def calculate_relevance(
-    result: Dict[str, Any],
-    category: str,
-    original_query: str,
-) -> float:
-    """
-    Score a Tavily result based on investor relevance.
-
-    Tavily score is useful, but should NOT be the only signal.
-    """
-
-    title = normalize_text(
-        result.get("title", "") or ""
-    )
-
-    content = normalize_text(
-        result.get("content", "") or ""
-    )
-
-    text = f"{title} {content}"
-
-    try:
-        tavily_score = float(
-            result.get("score") or 0
-        )
-    except (TypeError, ValueError):
-        tavily_score = 0.0
-
-    # Start with Tavily score.
-    score = tavily_score
-
-    # --------------------------------------------------------
-    # Strong positive signals
-    # --------------------------------------------------------
-
-    positive_terms = {
-        "investor": 0.18,
-        "investors": 0.18,
-        "investing": 0.20,
-        "investment": 0.18,
-        "investments": 0.18,
-        "venture capital": 0.25,
-        "venture fund": 0.20,
-        "vc fund": 0.20,
-        "fund": 0.10,
-        "portfolio": 0.12,
-        "portfolio companies": 0.15,
-        "startup funding": 0.15,
-        "funding": 0.10,
-        "backs startups": 0.18,
-        "backing startups": 0.18,
-        "early stage": 0.20,
-        "early-stage": 0.20,
-        "pre-seed": 0.25,
-        "pre seed": 0.25,
-        "seed stage": 0.22,
-        "seed": 0.08,
-        "india": 0.12,
-        "indian startups": 0.20,
-        "indian startup": 0.18,
-    }
-
-    for term, weight in positive_terms.items():
-
-        if term in text:
-            score += weight
-
-    # --------------------------------------------------------
-    # Category-specific signals
-    # --------------------------------------------------------
-
-    category_terms = {
-        "VC": [
-            "venture capital",
-            "vc fund",
-            "venture fund",
-            "venture partner",
-            "portfolio",
-        ],
-
-        "ANGEL": [
-            "angel investor",
-            "angel network",
-            "angel fund",
-            "angel investing",
-        ],
-
-        "ACCELERATOR": [
-            "accelerator",
-            "accelerator program",
-            "startup accelerator",
-        ],
-
-        "INCUBATOR": [
-            "incubator",
-            "incubation",
-            "startup incubator",
-        ],
-
-        "FAMILY_OFFICE": [
-            "family office",
-            "family offices",
-        ],
-
-        "FOUNDATION": [
-            "foundation",
-            "impact investor",
-            "impact investing",
-        ],
-
-        "LP": [
-            "limited partner",
-            "limited partners",
-            "institutional investor",
-            "fund of funds",
-        ],
-    }
-
-    for term in category_terms.get(category, []):
-
-        if term in text:
-            score += 0.20
-
-    # --------------------------------------------------------
-    # Negative signals
-    # --------------------------------------------------------
-
-    negative_terms = {
-        "job": 0.15,
-        "jobs": 0.15,
-        "career": 0.15,
-        "careers": 0.15,
-        "salary": 0.15,
-        "hiring": 0.15,
-        "recruitment": 0.15,
-        "real estate": 0.20,
-        "loan": 0.20,
-        "insurance": 0.15,
-        "stock price": 0.15,
-        "share price": 0.15,
-        "crypto price": 0.15,
-    }
-
-    for term, penalty in negative_terms.items():
-
-        if term in text:
-            score -= penalty
-
-    # --------------------------------------------------------
-    # Require actual investment language
-    # --------------------------------------------------------
-
-    investment_evidence = [
-        "invest",
-        "investing",
-        "investment",
-        "funding",
-        "funded",
-        "portfolio",
-        "backs",
-        "backed",
-    ]
-
-    if not any(
-        term in text
-        for term in investment_evidence
-    ):
-        score -= 0.30
-
-    # --------------------------------------------------------
-    # India relevance
-    # --------------------------------------------------------
-
-    india_terms = [
-        "india",
-        "indian",
-        "india-focused",
-        "india focused",
-    ]
-
-    if not any(
-        term in text
-        for term in india_terms
-    ):
-        score -= 0.25
-
-    # --------------------------------------------------------
-    # Early-stage relevance
-    # --------------------------------------------------------
-
-    stage_terms = [
-        "early stage",
-        "early-stage",
-        "pre-seed",
-        "pre seed",
-        "seed stage",
-        "seed-stage",
-    ]
-
-    if any(
-        term in text
-        for term in stage_terms
-    ):
-        score += 0.20
-
-    return max(
-        0.0,
-        min(score, 2.0)
-    )
+    return name
 
 
 # ============================================================
-# EXTRACT INVESTOR NAME
+# ARTICLE / LISTICLE DETECTION
 # ============================================================
 
 def is_list_or_article(title: str) -> bool:
-    """
-    Determine whether a search result title is likely to be
-    an article, ranking, directory, listicle, or search page
-    rather than an individual organization.
-    """
-
     title = normalize_text(title)
 
     if not title:
@@ -717,617 +345,20 @@ def is_list_or_article(title: str) -> bool:
     ):
         return True
 
-    # Question-style titles are almost never organizations.
     if title.endswith("?"):
         return True
 
-    # Very long titles are usually article headings.
     if len(title.split()) > 12:
         return True
 
     return False
 
-def calculate_source_quality(
-    result: Dict[str, Any],
-) -> float:
-    """
-    Estimate whether the result is likely to be an
-    organization page rather than an article/listicle.
-    """
-
-    title = normalize_text(
-        result.get("title") or ""
-    )
-
-    content = normalize_text(
-        result.get("content") or ""
-    )
-
-    url = result.get("url") or ""
-
-    score = 0.0
-
-    # Official-looking title.
-    if not is_list_or_article(title):
-        score += 0.20
-
-    # Strong organization language.
-    explicit_terms = [
-        "is a venture capital firm",
-        "is a venture fund",
-        "is an investment firm",
-        "we invest in",
-        "we back",
-        "our portfolio",
-        "our investments",
-        "our team",
-    ]
-
-    for term in explicit_terms:
-        if term in content:
-            score += 0.15
-
-    # Strong category language.
-    category_terms = [
-        "venture capital",
-        "angel investor",
-        "accelerator",
-        "incubator",
-        "family office",
-        "impact investor",
-    ]
-
-    for term in category_terms:
-        if term in content:
-            score += 0.05
-
-    # Organization/about language.
-    organization_terms = [
-        "about us",
-        "about",
-        "portfolio",
-        "team",
-        "investment thesis",
-        "our mission",
-        "our approach",
-    ]
-
-    for term in organization_terms:
-        if term in content:
-            score += 0.04
-
-    # Penalize obvious third-party list/article pages.
-    bad_domains = [
-        "linkedin.com",
-        "crunchbase.com",
-        "tracxn.com",
-        "medium.com",
-        "forbes.com",
-        "inc42.com",
-        "yourstory.com",
-    ]
-
-    try:
-        domain = urlparse(url).netloc.lower()
-    except Exception:
-        domain = ""
-
-    if any(
-        bad_domain in domain
-        for bad_domain in bad_domains
-    ):
-        score -= 0.10
-
-    return max(
-        0.0,
-        min(score, 1.0)
-    )
-
 
 # ============================================================
-# SEARCH TAVILY
+# ORGANIZATION VALIDATION
 # ============================================================
-
-async def search_web(
-    query: str
-) -> List[Dict[str, Any]]:
-    """
-    Run multiple targeted Tavily searches.
-    """
-
-    search_queries = generate_search_queries(
-        query
-    )
-
-    all_results = []
-
-    print(
-        f"🔎 Generated "
-        f"{len(search_queries)} targeted searches"
-    )
-
-    # --------------------------------------------------------
-    # Execute searches
-    # --------------------------------------------------------
-
-    for search in search_queries:
-
-        category = search["category"]
-
-        search_query = search["query"]
-
-        print(
-            f"🔍 [{category}] {search_query}"
-        )
-
-        try:
-
-            response = tavily_client.search(
-                query=search_query,
-
-                # Advanced gives better content extraction.
-                search_depth="advanced",
-
-                # 10 results per search.
-                max_results=10,
-
-                # We want raw results, not Tavily's single
-                # generated answer.
-                include_answer=False,
-
-                include_raw_content=True,
-            )
-
-            for result in response.get(
-                "results",
-                []
-            ):
-
-                all_results.append({
-                    "title": result.get("title") or "",
-                    "content": result.get("content") or "",
-                    "raw_content": result.get("raw_content") or "",
-                    "url": result.get("url") or "",
-                    "score": result.get("score") or 0,
-                    "category": category,
-                    "search_query": search_query,
-                    "source": "tavily",
-                })
-
-        except Exception as e:
-
-            print(
-                f"⚠️ Tavily search failed "
-                f"for [{category}]: {e}"
-            )
-
-    print(
-        f"📊 Raw Tavily results: "
-        f"{len(all_results)}"
-    )
-
-    # ========================================================
-    # DEDUPLICATION
-    # ========================================================
-
-    unique_results = {}
-
-    for result in all_results:
-
-        url = result.get(
-            "url",
-            ""
-        )
-
-        domain = normalize_url(url)
-
-        title = normalize_text(
-            result.get(
-                "title",
-                ""
-            )
-        )
-
-        # Prefer URL/domain as the primary identifier.
-        key = (
-            url.lower().strip()
-            if url
-            else title
-        )
-
-        if not key:
-            continue
-
-        # If the same page appears multiple times,
-        # keep the strongest version.
-        if key not in unique_results:
-
-            unique_results[key] = result
-
-        else:
-
-            existing = unique_results[key]
-
-            if result.get(
-                "score",
-                0
-            ) > existing.get(
-                "score",
-                0
-            ):
-
-                unique_results[key] = result
-
-    results = list(
-        unique_results.values()
-    )
-
-    print(
-        f"📊 Unique results: "
-        f"{len(results)}"
-    )
-
-    # ========================================================
-    # SCORE RESULTS
-    # ========================================================
-
-    for index, result in enumerate(results):
-        try:
-            try:
-                result["relevance"] = calculate_relevance(
-                    result,
-                    result.get("category") or "VC",
-                    query,
-                )
-            except Exception as e:
-                print(
-                    f"⚠️ Failed to score result #{index}: {e}"
-                )
-                print(
-                    f"   URL: {result.get('url') or ''}"
-                )
-                print(
-                    f"   Title: {result.get('title') or ''}"
-                )
-
-                result["relevance"] = 0.0
-        except Exception as e:
-            print(
-                f"⚠️ Failed to process result #{index}: {e}"
-            )
-            print(
-                f"   Title: {result.get('title') or ''}"
-            )
-            print(
-                f"   URL: {result.get('url') or ''}"
-            )
-            continue
-
-    # ========================================================
-    # SORT
-    # ========================================================
-
-    results.sort(
-        key=lambda x: x.get(
-            "relevance",
-            0
-        ),
-        reverse=True,
-    )
-
-    return results
-
-
-# ============================================================
-# BUILD INVESTOR RESULTS
-# ============================================================
-
-def build_investor_results(
-    results: List[Dict[str, Any]],
-    limit: int = 50,
-) -> List[Dict[str, Any]]:
-
-    investors = []
-
-    seen_names = set()
-
-    for result in results:
-
-        title = result.get("title") or ""
-        content = result.get("content") or ""
-        raw_content = result.get("raw_content") or ""
-        url = result.get("url") or ""
-        relevance = float(
-            result.get(
-                "relevance",
-                0
-            )
-        )
-
-        # ----------------------------------------------------
-        # Reject weak search results
-        # ----------------------------------------------------
-
-        if relevance < 0.65:
-            continue
-
-        # ----------------------------------------------------
-        # Reject article/listicle headings
-        # ----------------------------------------------------
-
-        if is_list_or_article(title):
-            continue
-
-        # ----------------------------------------------------
-        # Combined evidence
-        # ----------------------------------------------------
-
-        text = normalize_text(
-            f"{title} {content} {raw_content[:8000]}"
-        )
-
-        # ----------------------------------------------------
-        # Require investment evidence
-        # ----------------------------------------------------
-
-        investment_terms = [
-            "invest",
-            "investing",
-            "investment",
-            "investments",
-            "portfolio",
-            "funding",
-            "funded",
-            "backs startups",
-            "backing startups",
-            "invests in",
-            "investing in",
-        ]
-
-        has_investment_evidence = any(
-            term in text
-            for term in investment_terms
-        )
-
-        if not has_investment_evidence:
-            continue
-
-        # ----------------------------------------------------
-        # Require India relevance
-        # ----------------------------------------------------
-
-        india_terms = [
-            "india",
-            "indian",
-            "india-focused",
-            "india focused",
-        ]
-
-        has_india_evidence = any(
-            term in text
-            for term in india_terms
-        )
-
-        if not has_india_evidence:
-            continue
-
-        # ----------------------------------------------------
-        # Extract ACTUAL organization
-        # ----------------------------------------------------
-
-        name = extract_organization_from_result(
-            result
-        )
-
-        if not name:
-            continue
-
-        name = clean_organization_name(
-            name
-        )
-
-        normalized_name = normalize_name(
-            name
-        )
-
-        if not normalized_name:
-            continue
-
-        if looks_like_generic_organization(
-            name
-        ):
-            continue
-
-        # ----------------------------------------------------
-        # Deduplicate organizations, not URLs
-        # ----------------------------------------------------
-
-        if normalized_name in seen_names:
-            continue
-
-        # ----------------------------------------------------
-        # Category / stage
-        # ----------------------------------------------------
-
-        category = detect_investor_category(
-            text
-        )
-
-        stage = detect_investment_stage(
-            text
-        )
-
-        # ----------------------------------------------------
-        # Source quality
-        # ----------------------------------------------------
-
-        source_quality = calculate_source_quality(
-            result
-        )
-
-        # ----------------------------------------------------
-        # Confidence
-        # ----------------------------------------------------
-
-        confidence = calculate_confidence(
-            text,
-            relevance,
-            category,
-            stage,
-        )
-
-        # Increase confidence when the page itself
-        # explicitly identifies an organization.
-        explicit_org = (
-            extract_explicit_organization_from_content(
-                content + "\n" + raw_content[:8000]
-            )
-        )
-
-        if explicit_org:
-            confidence += 0.10
-
-        # Source quality contributes to confidence.
-        confidence += source_quality * 0.10
-
-        confidence = round(
-            min(confidence, 0.99),
-            2
-        )
-
-        seen_names.add(
-            normalized_name
-        )
-
-        # ----------------------------------------------------
-        # Description
-        # ----------------------------------------------------
-
-        description = (
-            content[:500]
-            if content
-            else ""
-        )
-
-        evidence = (
-            content[:1000]
-            if content
-            else raw_content[:1000]
-        )
-
-        investors.append({
-
-            # Actual organization name.
-            "name": name,
-
-            # Frontend already expects this.
-            "normalized_name": normalized_name,
-
-            "type": category,
-
-            "country": "India",
-
-            "stage": stage,
-
-            "description": description,
-
-            "evidence": evidence,
-
-            "confidence": confidence,
-
-            "relevance": round(
-                relevance,
-                3,
-            ),
-
-            "source_quality": round(
-                source_quality,
-                3,
-            ),
-
-            "url": url,
-
-            "source": "Tavily",
-
-            "search_query": result.get(
-                "search_query",
-                ""
-            ),
-        })
-
-        if len(investors) >= limit:
-            break
-
-    return investors
-
-# ============================================================
-# ORGANIZATION EXTRACTION
-# ============================================================
-
-GENERIC_ORGANIZATION_NAMES = {
-    "venture capital",
-    "venture capital firms",
-    "venture capital investors",
-    "venture capital funds",
-    "vc funds",
-    "vc investors",
-    "seed investors",
-    "seed funds",
-    "angel investors",
-    "angel investors in india",
-    "investors in india",
-    "startup investors",
-    "startup funding",
-    "startup investors in india",
-    "investor directory",
-    "investor list",
-    "investment firms",
-    "investment funds",
-    "funding firms",
-    "venture investors",
-    "early stage investors",
-    "early-stage investors",
-    "accelerators in india",
-    "startup accelerators in india",
-    "startup incubators in india",
-}
-
-
-def clean_organization_name(name: str) -> str:
-    """
-    Clean an extracted organization name without destroying
-    legitimate company names.
-    """
-
-    if not name:
-        return ""
-
-    name = name.strip()
-
-    # Remove surrounding punctuation.
-    name = re.sub(r'^[\s\-–—|:;,]+', '', name)
-    name = re.sub(r'[\s\-–—|:;,]+$', '', name)
-
-    # Remove common sentence endings.
-    name = re.sub(
-        r'\s+(is|are|was|were|has|have|provides|offers|invests).*$',
-        '',
-        name,
-        flags=re.IGNORECASE,
-    )
-
-    # Collapse whitespace.
-    name = re.sub(r'\s+', ' ', name).strip()
-
-    return name
-
 
 def looks_like_generic_organization(name: str) -> bool:
-    """
-    Reject names that are actually search headings,
-    article titles, categories, or generic descriptions.
-    """
-
     normalized = normalize_name(name)
 
     if not normalized:
@@ -1337,45 +368,43 @@ def looks_like_generic_organization(name: str) -> bool:
         return True
 
     generic_patterns = [
-        r'^top\s+',
-        r'^best\s+',
-        r'^list\s+of\s+',
-        r'^list\s*:',
-        r'^ranking',
-        r'^rankings',
-        r'^guide\s+to\s+',
-        r'^directory',
-        r'^how\s+to\s+',
-        r'^where\s+to\s+',
-        r'^who\s+',
-        r'^investors?\s+in\s+',
-        r'^venture\s+capital\s+firms?\s+',
-        r'^venture\s+capital\s+investors?\s+',
-        r'^venture\s+capital\s+funds?\s+',
-        r'^seed\s+investors?\s+',
-        r'^seed\s+funds?\s+',
-        r'^angel\s+investors?\s+',
-        r'^startup\s+investors?\s+',
-        r'^startup\s+funding',
-        r'^funds?\s+investing\s+',
-        r'^firms?\s+investing\s+',
-        r'\bin\s+india$',
-        r'\bfor\s+startups$',
-        r'\bstartup\s+funding$',
+        r"^top\s+",
+        r"^best\s+",
+        r"^list\s+of\s+",
+        r"^list\s*:",
+        r"^ranking",
+        r"^rankings",
+        r"^guide\s+to\s+",
+        r"^directory",
+        r"^how\s+to\s+",
+        r"^where\s+to\s+",
+        r"^who\s+",
+        r"^investors?\s+in\s+",
+        r"^venture\s+capital\s+firms?\s+",
+        r"^venture\s+capital\s+investors?\s+",
+        r"^venture\s+capital\s+funds?\s+",
+        r"^seed\s+investors?\s+",
+        r"^seed\s+funds?\s+",
+        r"^angel\s+investors?\s+",
+        r"^startup\s+investors?\s+",
+        r"^startup\s+funding",
+        r"^funds?\s+investing\s+",
+        r"^firms?\s+investing\s+",
+        r"\bin\s+india$",
+        r"\bfor\s+startups$",
+        r"\bstartup\s+funding$",
     ]
 
     return any(
-        re.search(pattern, normalized)
+        re.search(
+            pattern,
+            normalized,
+        )
         for pattern in generic_patterns
     )
 
 
 def is_probable_organization_name(name: str) -> bool:
-    """
-    Determine whether a candidate looks like an actual
-    organization rather than an article/search heading.
-    """
-
     if not name:
         return False
 
@@ -1395,7 +424,6 @@ def is_probable_organization_name(name: str) -> bool:
     if len(words) > 12:
         return False
 
-    # Reject obvious sentence-like candidates.
     sentence_words = {
         "the",
         "top",
@@ -1425,18 +453,11 @@ def is_probable_organization_name(name: str) -> bool:
     return True
 
 
+# ============================================================
+# DOMAIN NAME
+# ============================================================
+
 def extract_domain_name(url: str) -> str:
-    """
-    Extract a human-readable brand candidate from the domain.
-
-    Example:
-        https://www.blume.vc/portfolio
-        -> Blume
-
-    This is only a fallback. It is NOT considered strong
-    evidence by itself.
-    """
-
     if not url:
         return ""
 
@@ -1459,10 +480,6 @@ def extract_domain_name(url: str) -> str:
 
         brand = domain_parts[0]
 
-        # Handle domains such as:
-        # accel.com
-        # blume.vc
-        # example.co.in
         if brand in {
             "blog",
             "news",
@@ -1470,92 +487,98 @@ def extract_domain_name(url: str) -> str:
             "invest",
             "about",
             "www2",
+            "app",
+            "mail",
         }:
             return ""
 
-        return brand.replace("-", " ").replace("_", " ").title()
+        return (
+            brand
+            .replace("-", " ")
+            .replace("_", " ")
+            .title()
+        )
 
     except Exception:
         return ""
 
 
+# ============================================================
+# EXPLICIT ORGANIZATION EXTRACTION
+# ============================================================
+
 def extract_explicit_organization_from_content(
     content: str,
 ) -> Optional[str]:
-    """
-    Extract organization names from explicit sentences in
-    the page content.
-
-    Examples:
-
-        "Blume Ventures is a venture capital firm..."
-
-        "Accel is a global venture capital firm..."
-
-        "Peak XV Partners invests in early-stage startups..."
-
-    This is much safer than using the search result title.
-    """
 
     if not content:
         return None
 
-    # Limit the amount of text we inspect.
-    text = content[:12000].strip()
+    text = content[:16000].strip()
 
     patterns = [
+
+        # Example:
         # "Blume Ventures is a venture capital firm"
-        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
-        r'is\s+(?:an?|the)\s+'
-        r'(?:venture capital|vc|investment|angel|startup|'
-        r'accelerator|incubator|private equity|impact)\b',
+        r"\b([A-Z][A-Za-z0-9&.'’\- ]{1,80}?)\s+"
+        r"is\s+(?:an?|the)\s+"
+        r"(?:venture capital|vc|investment|angel|startup|"
+        r"accelerator|incubator|private equity|impact)\b",
 
+        # Example:
         # "Blume Ventures is one of..."
-        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
-        r'is\s+one\s+of\s+',
+        r"\b([A-Z][A-Za-z0-9&.'’\- ]{1,80}?)\s+"
+        r"is\s+one\s+of\s+",
 
+        # Example:
         # "Blume Ventures invests in..."
-        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
-        r'(?:invests|invested|investing)\s+'
-        r'(?:in|into)\b',
+        r"\b([A-Z][A-Za-z0-9&.'’\- ]{1,80}?)\s+"
+        r"(?:invests|invested|investing)\s+"
+        r"(?:in|into)\b",
 
+        # Example:
         # "Blume Ventures focuses on..."
-        r'\b([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)\s+'
-        r'(?:focuses|specializes|specialises)\s+on\b',
+        r"\b([A-Z][A-Za-z0-9&.'’\- ]{1,80}?)\s+"
+        r"(?:focuses|specializes|specialises)\s+on\b",
 
+        # Example:
         # "Founded in 2010, Blume Ventures..."
-        r'\b(?:founded|established|launched)\s+'
-        r'(?:in\s+\d{4}\s*,?\s*)?'
-        r'([A-Z][A-Za-z0-9&.\'’\- ]{1,80}?)'
-        r'(?:,|\s+is|\s+was)\b',
+        r"\b(?:founded|established|launched)\s+"
+        r"(?:in\s+\d{4}\s*,?\s*)?"
+        r"([A-Z][A-Za-z0-9&.'’\- ]{1,80}?)"
+        r"(?:,|\s+is|\s+was)\b",
     ]
 
     for pattern in patterns:
+
         try:
             matches = re.findall(
                 pattern,
                 text,
                 flags=re.IGNORECASE,
             )
+
         except Exception:
             continue
 
         for match in matches:
+
             if isinstance(match, str):
                 candidate = match
+
             elif isinstance(match, tuple) and match:
                 candidate = match[0]
+
             else:
                 continue
 
-            candidate = clean_organization_name(candidate)
+            candidate = clean_organization_name(
+                candidate
+            )
 
-            if not is_probable_organization_name(candidate):
-                continue
-
-            normalized = normalize_name(candidate)
-
-            if normalized in GENERIC_ORGANIZATION_NAMES:
+            if not is_probable_organization_name(
+                candidate
+            ):
                 continue
 
             return candidate
@@ -1563,96 +586,539 @@ def extract_explicit_organization_from_content(
     return None
 
 
-def extract_organization_from_result(
-    result: Dict[str, Any]
+# ============================================================
+# EXA RESULT NORMALIZATION
+# ============================================================
+
+def normalize_exa_result(
+    result: Any,
+    category: str,
+    search_query: str,
+) -> Dict[str, Any]:
+
+    title = getattr(
+        result,
+        "title",
+        "",
+    ) or ""
+
+    url = getattr(
+        result,
+        "url",
+        "",
+    ) or ""
+
+    text = getattr(
+        result,
+        "text",
+        "",
+    ) or ""
+
+    author = getattr(
+        result,
+        "author",
+        "",
+    ) or ""
+
+    published_date = getattr(
+        result,
+        "published_date",
+        "",
+    ) or ""
+
+    return {
+        "title": title,
+        "content": text,
+        "raw_content": text,
+        "url": url,
+        "author": author,
+        "published_date": published_date,
+        "score": 0.0,
+        "category": category,
+        "search_query": search_query,
+        "source": "exa",
+        "discovery_source": "exa",
+    }
+
+
+# ============================================================
+# EXA SEARCH
+# ============================================================
+
+async def exa_search(
+    search_query: str,
+    category: str,
+) -> List[Dict[str, Any]]:
+
+    print(
+        f"🟣 Exa discovery [{category}]: "
+        f"{search_query}"
+    )
+
+    try:
+
+        response = await asyncio.to_thread(
+            exa_client.search,
+            search_query,
+            type="auto",
+            num_results=EXA_MAX_RESULTS,
+            contents={
+                "text": {
+                    "max_characters": 6000
+                }
+            },
+        )
+
+        results = []
+
+        raw_results = getattr(
+            response,
+            "results",
+            [],
+        )
+
+        for item in raw_results:
+
+            normalized = normalize_exa_result(
+                item,
+                category,
+                search_query,
+            )
+
+            if not normalized.get("url"):
+                continue
+
+            results.append(
+                normalized
+            )
+
+        print(
+            f"🟣 Exa returned "
+            f"{len(results)} results"
+        )
+
+        return results
+
+    except Exception as exc:
+
+        print(
+            f"⚠️ Exa search failed: "
+            f"{exc}"
+        )
+
+        return []
+
+
+# ============================================================
+# TAVILY SEARCH
+# ============================================================
+
+async def tavily_search(
+    search_query: str,
+    category: str,
+) -> List[Dict[str, Any]]:
+
+    print(
+        f"🔵 Tavily verification [{category}]: "
+        f"{search_query}"
+    )
+
+    try:
+
+        response = await asyncio.to_thread(
+            tavily_client.search,
+            query=search_query,
+            search_depth="advanced",
+            max_results=TAVILY_MAX_RESULTS,
+            include_answer=False,
+            include_raw_content=True,
+        )
+
+        results = []
+
+        for result in response.get(
+            "results",
+            [],
+        ):
+
+            results.append({
+                "title": result.get(
+                    "title"
+                ) or "",
+
+                "content": result.get(
+                    "content"
+                ) or "",
+
+                "raw_content": result.get(
+                    "raw_content"
+                ) or "",
+
+                "url": result.get(
+                    "url"
+                ) or "",
+
+                "score": result.get(
+                    "score"
+                ) or 0,
+
+                "category": category,
+
+                "search_query": search_query,
+
+                "source": "tavily",
+
+                "discovery_source": "tavily",
+            })
+
+        print(
+            f"🔵 Tavily returned "
+            f"{len(results)} results"
+        )
+
+        return results
+
+    except Exception as exc:
+
+        print(
+            f"⚠️ Tavily search failed: "
+            f"{exc}"
+        )
+
+        return []
+
+
+# ============================================================
+# QUERY DETECTION
+# ============================================================
+
+def detect_geography(
+    query: str,
+) -> str:
+
+    query = normalize_text(query)
+
+    if "india" in query:
+        return "India"
+
+    if "indian" in query:
+        return "India"
+
+    if "uae" in query:
+        return "UAE"
+
+    if "united arab emirates" in query:
+        return "UAE"
+
+    return "India"
+
+
+def detect_stage(
+    query: str,
+) -> str:
+
+    query = normalize_text(query)
+
+    if (
+        "pre-seed" in query
+        or "pre seed" in query
+    ):
+        return "pre-seed"
+
+    if "seed" in query:
+        return "seed"
+
+    if (
+        "early stage" in query
+        or "early-stage" in query
+    ):
+        return "early stage"
+
+    return "early stage"
+
+
+def detect_requested_categories(
+    query: str,
+) -> List[str]:
+
+    query = normalize_text(query)
+
+    categories = []
+
+    category_aliases = {
+        "VC": [
+            "vc",
+            "venture capital",
+            "venture capital firms",
+            "venture funds",
+        ],
+
+        "ANGEL": [
+            "angel",
+            "angel investor",
+            "angel investors",
+        ],
+
+        "ACCELERATOR": [
+            "accelerator",
+            "accelerators",
+        ],
+
+        "INCUBATOR": [
+            "incubator",
+            "incubators",
+        ],
+
+        "FAMILY_OFFICE": [
+            "family office",
+            "family offices",
+        ],
+
+        "FOUNDATION": [
+            "foundation",
+            "foundations",
+            "impact investor",
+        ],
+
+        "LP": [
+            "lp",
+            "limited partner",
+            "limited partners",
+            "fund of funds",
+        ],
+    }
+
+    for category, aliases in category_aliases.items():
+
+        if any(
+            alias in query
+            for alias in aliases
+        ):
+            categories.append(category)
+
+    if not categories:
+        categories = [
+            "VC",
+            "ANGEL",
+            "ACCELERATOR",
+            "INCUBATOR",
+            "FAMILY_OFFICE",
+            "FOUNDATION",
+            "LP",
+        ]
+
+    return categories
+
+
+# ============================================================
+# ENTITY DISCOVERY QUERIES
+# ============================================================
+
+def build_entity_search_queries(
+    user_query: str,
+) -> List[Dict[str, str]]:
+
+    geography = detect_geography(
+        user_query
+    )
+
+    stage = detect_stage(
+        user_query
+    )
+
+    categories = detect_requested_categories(
+        user_query
+    )
+
+    queries = []
+
+    for category in categories:
+
+        if category == "VC":
+
+            queries.extend([
+                {
+                    "category": "VC",
+                    "query": (
+                        f"{geography} venture capital firms "
+                        f"investing in {stage} startups"
+                    ),
+                },
+
+                {
+                    "category": "VC",
+                    "query": (
+                        f"{geography} VC funds "
+                        f"portfolio {stage} startups"
+                    ),
+                },
+            ])
+
+        elif category == "ANGEL":
+
+            queries.extend([
+                {
+                    "category": "ANGEL",
+                    "query": (
+                        f"{geography} angel investors "
+                        f"{stage} startup investments"
+                    ),
+                },
+
+                {
+                    "category": "ANGEL",
+                    "query": (
+                        f"{geography} angel networks "
+                        f"startup portfolio investments"
+                    ),
+                },
+            ])
+
+        elif category == "ACCELERATOR":
+
+            queries.extend([
+                {
+                    "category": "ACCELERATOR",
+                    "query": (
+                        f"{geography} startup accelerators "
+                        f"investment funding {stage}"
+                    ),
+                },
+            ])
+
+        elif category == "INCUBATOR":
+
+            queries.extend([
+                {
+                    "category": "INCUBATOR",
+                    "query": (
+                        f"{geography} startup incubators "
+                        f"funding investment"
+                    ),
+                },
+            ])
+
+        elif category == "FAMILY_OFFICE":
+
+            queries.extend([
+                {
+                    "category": "FAMILY_OFFICE",
+                    "query": (
+                        f"{geography} family offices "
+                        f"startup venture investments"
+                    ),
+                },
+            ])
+
+        elif category == "FOUNDATION":
+
+            queries.extend([
+                {
+                    "category": "FOUNDATION",
+                    "query": (
+                        f"{geography} foundations "
+                        f"impact startup investments"
+                    ),
+                },
+            ])
+
+        elif category == "LP":
+
+            queries.extend([
+                {
+                    "category": "LP",
+                    "query": (
+                        f"{geography} limited partners "
+                        f"venture capital fund investments"
+                    ),
+                },
+            ])
+
+    # Remove duplicate queries.
+    seen = set()
+    unique = []
+
+    for item in queries:
+
+        key = normalize_text(
+            item["query"]
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique.append(item)
+
+    return unique
+
+
+# ============================================================
+# EXTRACT CANDIDATE ORGANIZATION
+# ============================================================
+
+def extract_candidate_from_result(
+    result: Dict[str, Any],
 ) -> Optional[str]:
-    """
-    Extract the actual organization represented by a
-    search result.
-
-    Priority:
-
-    1. Explicit organization statement in page content
-    2. Strong organization-style title
-    3. Domain brand as a weak fallback
-
-    We NEVER blindly trust a generic search-result heading.
-    """
 
     title = (
-        result.get("title", "")
+        result.get("title")
         or ""
     ).strip()
 
     content = (
-        result.get("content", "")
+        result.get("content")
         or ""
     ).strip()
 
     raw_content = (
-        result.get("raw_content", "")
+        result.get("raw_content")
         or ""
     ).strip()
 
     url = (
-        result.get("url", "")
+        result.get("url")
         or ""
     ).strip()
 
     # --------------------------------------------------------
-    # 1. Never use obvious article/listicle titles.
+    # 1. Explicit organization statement
     # --------------------------------------------------------
 
-    if is_list_or_article(title):
-        title_candidate = None
-    else:
-        title_candidate = clean_organization_name(
+    explicit = (
+        extract_explicit_organization_from_content(
+            content
+            + "\n"
+            + raw_content[:10000]
+        )
+    )
+
+    if explicit:
+        return explicit
+
+    # --------------------------------------------------------
+    # 2. Exa/Tavily title
+    # --------------------------------------------------------
+
+    if title and not is_list_or_article(title):
+
+        candidate = clean_organization_name(
             title
         )
 
-    # --------------------------------------------------------
-    # 2. Strongest signal:
-    # explicit organization name in page content.
-    # --------------------------------------------------------
-
-    combined_content = (
-        content
-        + "\n"
-        + raw_content[:10000]
-    )
-
-    explicit_name = (
-        extract_explicit_organization_from_content(
-            combined_content
-        )
-    )
-
-    if explicit_name:
-        return explicit_name
+        if is_probable_organization_name(
+            candidate
+        ):
+            return candidate
 
     # --------------------------------------------------------
-    # 3. Use title only if it looks like an actual
-    # organization name.
-    # --------------------------------------------------------
-
-    if (
-        title_candidate
-        and is_probable_organization_name(
-            title_candidate
-        )
-    ):
-        return title_candidate
-
-    # --------------------------------------------------------
-    # 4. Weak fallback:
-    # derive a brand from the domain.
-    #
-    # Only use this when the page contains strong
-    # investment evidence.
+    # 3. Domain fallback
     # --------------------------------------------------------
 
     text = normalize_text(
-        f"{title} {content} {raw_content[:5000]}"
+        f"{title} "
+        f"{content} "
+        f"{raw_content[:6000]}"
     )
 
     investment_terms = [
@@ -1672,13 +1138,14 @@ def extract_organization_from_result(
         "impact investor",
     ]
 
-    has_investment_evidence = any(
+    if any(
         term in text
         for term in investment_terms
-    )
+    ):
 
-    if has_investment_evidence:
-        domain_name = extract_domain_name(url)
+        domain_name = extract_domain_name(
+            url
+        )
 
         if is_probable_organization_name(
             domain_name
@@ -1687,11 +1154,906 @@ def extract_organization_from_result(
 
     return None
 
+
+# ============================================================
+# DISCOVER CANDIDATES USING EXA
+# ============================================================
+
+async def discover_candidates(
+    user_query: str,
+) -> List[Dict[str, Any]]:
+
+    queries = build_entity_search_queries(
+        user_query
+    )
+
+    print(
+        f"🧠 Generated "
+        f"{len(queries)} discovery queries"
+    )
+
+    tasks = []
+
+    for item in queries:
+
+        tasks.append(
+            exa_search(
+                item["query"],
+                item["category"],
+            )
+        )
+
+    responses = await asyncio.gather(
+        *tasks,
+        return_exceptions=True,
+    )
+
+    all_results = []
+
+    for response in responses:
+
+        if isinstance(
+            response,
+            Exception,
+        ):
+            continue
+
+        all_results.extend(
+            response
+        )
+
+    print(
+        f"🟣 Total Exa discovery results: "
+        f"{len(all_results)}"
+    )
+
+    # --------------------------------------------------------
+    # Extract organizations
+    # --------------------------------------------------------
+
+    candidates = {}
+
+    for result in all_results:
+
+        organization = (
+            extract_candidate_from_result(
+                result
+            )
+        )
+
+        if not organization:
+            continue
+
+        organization = clean_organization_name(
+            organization
+        )
+
+        if not is_probable_organization_name(
+            organization
+        ):
+            continue
+
+        normalized = normalize_name(
+            organization
+        )
+
+        if not normalized:
+            continue
+
+        if normalized in candidates:
+
+            existing = candidates[
+                normalized
+            ]
+
+            existing[
+                "discovery_count"
+            ] += 1
+
+            existing[
+                "discovery_results"
+            ].append(result)
+
+        else:
+
+            candidates[
+                normalized
+            ] = {
+                "name": organization,
+                "normalized_name": normalized,
+                "discovery_count": 1,
+                "discovery_results": [
+                    result
+                ],
+                "category": result.get(
+                    "category",
+                    "VC",
+                ),
+                "source": "exa",
+            }
+
+    candidate_list = list(
+        candidates.values()
+    )
+
+    # --------------------------------------------------------
+    # Rank candidates
+    # --------------------------------------------------------
+
+    candidate_list.sort(
+        key=lambda item: (
+            item.get(
+                "discovery_count",
+                0,
+            ),
+            len(
+                item.get(
+                    "discovery_results",
+                    [],
+                )
+            ),
+        ),
+        reverse=True,
+    )
+
+    candidate_list = candidate_list[
+        :MAX_CANDIDATES_TO_VERIFY
+    ]
+
+    print(
+        f"🎯 Candidates selected for "
+        f"Tavily verification: "
+        f"{len(candidate_list)}"
+    )
+
+    for candidate in candidate_list:
+
+        print(
+            f"   → {candidate['name']} "
+            f"({candidate['category']})"
+        )
+
+    return candidate_list
+
+
+# ============================================================
+# BUILD VERIFICATION QUERIES
+# ============================================================
+
+def build_verification_queries(
+    candidate_name: str,
+    user_query: str,
+    category: str,
+) -> List[str]:
+
+    geography = detect_geography(
+        user_query
+    )
+
+    stage = detect_stage(
+        user_query
+    )
+
+    queries = [
+        (
+            f'"{candidate_name}" '
+            f"invests in {geography} startups "
+            f"{stage}"
+        ),
+
+        (
+            f'"{candidate_name}" '
+            f"portfolio investments "
+            f"{geography}"
+        ),
+    ]
+
+    if category == "VC":
+
+        queries.append(
+            (
+                f'"{candidate_name}" '
+                f"venture capital portfolio "
+                f"{geography}"
+            )
+        )
+
+    elif category == "ANGEL":
+
+        queries.append(
+            (
+                f'"{candidate_name}" '
+                f"angel investor "
+                f"{geography}"
+            )
+        )
+
+    elif category == "ACCELERATOR":
+
+        queries.append(
+            (
+                f'"{candidate_name}" '
+                f"accelerator investment "
+                f"{geography}"
+            )
+        )
+
+    elif category == "INCUBATOR":
+
+        queries.append(
+            (
+                f'"{candidate_name}" '
+                f"incubator funding "
+                f"{geography}"
+            )
+        )
+
+    return list(
+        dict.fromkeys(
+            queries[
+                :MAX_TAVILY_VERIFICATION_SEARCHES
+            ]
+        )
+    )
+
+
+# ============================================================
+# VERIFY CANDIDATE WITH TAVILY
+# ============================================================
+
+async def verify_candidate(
+    candidate: Dict[str, Any],
+    user_query: str,
+) -> Dict[str, Any]:
+
+    candidate_name = candidate[
+        "name"
+    ]
+
+    category = candidate.get(
+        "category",
+        "VC",
+    )
+
+    verification_queries = (
+        build_verification_queries(
+            candidate_name,
+            user_query,
+            category,
+        )
+    )
+
+    tasks = []
+
+    for query in verification_queries:
+
+        tasks.append(
+            tavily_search(
+                query,
+                category,
+            )
+        )
+
+    responses = await asyncio.gather(
+        *tasks,
+        return_exceptions=True,
+    )
+
+    tavily_results = []
+
+    for response in responses:
+
+        if isinstance(
+            response,
+            Exception,
+        ):
+            continue
+
+        tavily_results.extend(
+            response
+        )
+
+    # --------------------------------------------------------
+    # Match Tavily results to candidate
+    # --------------------------------------------------------
+
+    candidate_tokens = set(
+        normalize_name(
+            candidate_name
+        ).split()
+    )
+
+    matched_results = []
+
+    for result in tavily_results:
+
+        text = normalize_text(
+            f"{result.get('title', '')} "
+            f"{result.get('content', '')} "
+            f"{result.get('raw_content', '')[:6000]}"
+        )
+
+        # Strong candidate-name match.
+        candidate_match = (
+            normalize_name(
+                candidate_name
+            ) in normalize_name(text)
+        )
+
+        token_matches = sum(
+            1
+            for token in candidate_tokens
+            if len(token) >= 3
+            and token in text
+        )
+
+        if (
+            candidate_match
+            or token_matches >= max(
+                1,
+                len(candidate_tokens) // 2,
+            )
+        ):
+            matched_results.append(
+                result
+            )
+
+    # --------------------------------------------------------
+    # Combine evidence
+    # --------------------------------------------------------
+
+    combined_text_parts = []
+
+    for result in matched_results:
+
+        combined_text_parts.append(
+            result.get(
+                "title",
+                "",
+            )
+        )
+
+        combined_text_parts.append(
+            result.get(
+                "content",
+                "",
+            )
+        )
+
+        combined_text_parts.append(
+            result.get(
+                "raw_content",
+                "",
+            )[:8000]
+        )
+
+    combined_text = normalize_text(
+        " ".join(
+            combined_text_parts
+        )
+    )
+
+    # --------------------------------------------------------
+    # Evidence checks
+    # --------------------------------------------------------
+
+    investment_terms = [
+        "invest",
+        "invested",
+        "investing",
+        "investment",
+        "investments",
+        "portfolio",
+        "funding",
+        "funded",
+        "backs",
+        "backed",
+        "portfolio companies",
+    ]
+
+    geography_terms = [
+        "india",
+        "indian",
+    ]
+
+    has_investment_evidence = any(
+        term in combined_text
+        for term in investment_terms
+    )
+
+    has_geography_evidence = any(
+        term in combined_text
+        for term in geography_terms
+    )
+
+    # --------------------------------------------------------
+    # Calculate verification score
+    # --------------------------------------------------------
+
+    verification_score = 0.0
+
+    if matched_results:
+        verification_score += 0.20
+
+    if has_investment_evidence:
+        verification_score += 0.30
+
+    if has_geography_evidence:
+        verification_score += 0.20
+
+    if len(matched_results) >= 2:
+        verification_score += 0.15
+
+    if candidate.get(
+        "discovery_count",
+        0,
+    ) >= 2:
+        verification_score += 0.10
+
+    # Exa + Tavily agreement.
+    if matched_results:
+        verification_score += 0.05
+
+    verification_score = min(
+        verification_score,
+        0.99,
+    )
+
+    verified = (
+        has_investment_evidence
+        and has_geography_evidence
+        and len(matched_results) > 0
+    )
+
+    # --------------------------------------------------------
+    # Best evidence
+    # --------------------------------------------------------
+
+    best_result = None
+
+    if matched_results:
+
+        matched_results.sort(
+            key=lambda result: float(
+                result.get(
+                    "score",
+                    0,
+                ) or 0
+            ),
+            reverse=True,
+        )
+
+        best_result = matched_results[0]
+
+    return {
+        **candidate,
+
+        "verified": verified,
+
+        "verification_score": round(
+            verification_score,
+            3,
+        ),
+
+        "verification_status": (
+            "EXA_TAVILY_VERIFIED"
+            if verified
+            else "EXA_DISCOVERED"
+        ),
+
+        "providers": [
+            "exa",
+            "tavily",
+        ],
+
+        "tavily_results": matched_results,
+
+        "best_result": best_result,
+
+        "has_investment_evidence": (
+            has_investment_evidence
+        ),
+
+        "has_geography_evidence": (
+            has_geography_evidence
+        ),
+
+        "evidence_text": combined_text[
+            :12000
+        ],
+    }
+
+
+# ============================================================
+# VERIFY ALL CANDIDATES
+# ============================================================
+
+async def verify_candidates(
+    candidates: List[Dict[str, Any]],
+    user_query: str,
+) -> List[Dict[str, Any]]:
+
+    if not candidates:
+        return []
+
+    tasks = []
+
+    for candidate in candidates:
+
+        tasks.append(
+            verify_candidate(
+                candidate,
+                user_query,
+            )
+        )
+
+    results = await asyncio.gather(
+        *tasks,
+        return_exceptions=True,
+    )
+
+    verified = []
+
+    for result in results:
+
+        if isinstance(
+            result,
+            Exception,
+        ):
+            print(
+                f"⚠️ Candidate verification "
+                f"failed: {result}"
+            )
+            continue
+
+        verified.append(
+            result
+        )
+
+    verified.sort(
+        key=lambda item: (
+            item.get(
+                "verified",
+                False,
+            ),
+            item.get(
+                "verification_score",
+                0,
+            ),
+            item.get(
+                "discovery_count",
+                0,
+            ),
+        ),
+        reverse=True,
+    )
+
+    return verified
+
+
+# ============================================================
+# RELEVANCE SCORING
+# ============================================================
+
+def calculate_relevance(
+    result: Dict[str, Any],
+    category: str,
+    original_query: str,
+) -> float:
+
+    title = normalize_text(
+        result.get(
+            "title",
+            "",
+        )
+    )
+
+    content = normalize_text(
+        result.get(
+            "content",
+            "",
+        )
+    )
+
+    raw_content = normalize_text(
+        result.get(
+            "raw_content",
+            "",
+        )[:6000]
+    )
+
+    text = (
+        f"{title} "
+        f"{content} "
+        f"{raw_content}"
+    )
+
+    try:
+
+        base_score = float(
+            result.get(
+                "score",
+                0,
+            ) or 0
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        base_score = 0.0
+
+    score = base_score
+
+    positive_terms = {
+        "investor": 0.10,
+        "investors": 0.10,
+        "investing": 0.15,
+        "investment": 0.15,
+        "investments": 0.15,
+        "venture capital": 0.20,
+        "venture fund": 0.15,
+        "vc fund": 0.15,
+        "fund": 0.08,
+        "portfolio": 0.12,
+        "portfolio companies": 0.15,
+        "startup funding": 0.12,
+        "funding": 0.08,
+        "backs startups": 0.15,
+        "backing startups": 0.15,
+        "early stage": 0.15,
+        "early-stage": 0.15,
+        "pre-seed": 0.20,
+        "pre seed": 0.20,
+        "seed stage": 0.15,
+        "indian startups": 0.18,
+        "indian startup": 0.15,
+        "india": 0.10,
+    }
+
+    for term, weight in (
+        positive_terms.items()
+    ):
+
+        if term in text:
+            score += weight
+
+    category_terms = {
+        "VC": [
+            "venture capital",
+            "vc fund",
+            "venture fund",
+            "portfolio",
+        ],
+
+        "ANGEL": [
+            "angel investor",
+            "angel network",
+            "angel fund",
+            "angel investing",
+        ],
+
+        "ACCELERATOR": [
+            "accelerator",
+            "accelerator program",
+        ],
+
+        "INCUBATOR": [
+            "incubator",
+            "incubation",
+        ],
+
+        "FAMILY_OFFICE": [
+            "family office",
+            "family offices",
+        ],
+
+        "FOUNDATION": [
+            "foundation",
+            "impact investor",
+            "impact investing",
+        ],
+
+        "LP": [
+            "limited partner",
+            "limited partners",
+            "institutional investor",
+            "fund of funds",
+        ],
+    }
+
+    for term in category_terms.get(
+        category,
+        [],
+    ):
+
+        if term in text:
+            score += 0.15
+
+    negative_terms = {
+        "job": 0.15,
+        "jobs": 0.15,
+        "career": 0.15,
+        "careers": 0.15,
+        "salary": 0.15,
+        "hiring": 0.15,
+        "recruitment": 0.15,
+        "real estate": 0.15,
+        "loan": 0.15,
+        "insurance": 0.15,
+        "stock price": 0.15,
+        "share price": 0.15,
+        "crypto price": 0.15,
+    }
+
+    for term, penalty in (
+        negative_terms.items()
+    ):
+
+        if term in text:
+            score -= penalty
+
+    if not any(
+        term in text
+        for term in [
+            "invest",
+            "investing",
+            "investment",
+            "funding",
+            "portfolio",
+            "backed",
+            "backs",
+        ]
+    ):
+        score -= 0.25
+
+    if not any(
+        term in text
+        for term in [
+            "india",
+            "indian",
+        ]
+    ):
+        score -= 0.20
+
+    return max(
+        0.0,
+        min(
+            score,
+            2.0,
+        ),
+    )
+
+
+# ============================================================
+# SOURCE QUALITY
+# ============================================================
+
+def calculate_source_quality(
+    result: Dict[str, Any],
+) -> float:
+
+    title = normalize_text(
+        result.get(
+            "title",
+            "",
+        )
+    )
+
+    content = normalize_text(
+        result.get(
+            "content",
+            "",
+        )
+    )
+
+    url = result.get(
+        "url",
+        "",
+    )
+
+    score = 0.0
+
+    if not is_list_or_article(
+        title
+    ):
+        score += 0.20
+
+    explicit_terms = [
+        "is a venture capital firm",
+        "is a venture fund",
+        "is an investment firm",
+        "we invest in",
+        "we back",
+        "our portfolio",
+        "our investments",
+        "our team",
+        "investment thesis",
+    ]
+
+    for term in explicit_terms:
+
+        if term in content:
+            score += 0.15
+
+    category_terms = [
+        "venture capital",
+        "angel investor",
+        "accelerator",
+        "incubator",
+        "family office",
+        "impact investor",
+    ]
+
+    for term in category_terms:
+
+        if term in content:
+            score += 0.05
+
+    organization_terms = [
+        "about us",
+        "about",
+        "portfolio",
+        "team",
+        "investment thesis",
+        "our mission",
+        "our approach",
+    ]
+
+    for term in organization_terms:
+
+        if term in content:
+            score += 0.04
+
+    bad_domains = [
+        "linkedin.com",
+        "crunchbase.com",
+        "tracxn.com",
+        "medium.com",
+        "forbes.com",
+        "inc42.com",
+        "yourstory.com",
+    ]
+
+    try:
+
+        domain = (
+            urlparse(
+                url
+            ).netloc.lower()
+        )
+
+    except Exception:
+
+        domain = ""
+
+    if any(
+        bad_domain in domain
+        for bad_domain in bad_domains
+    ):
+        score -= 0.10
+
+    return max(
+        0.0,
+        min(
+            score,
+            1.0,
+        ),
+    )
+
+
+# ============================================================
+# CATEGORY DETECTION
+# ============================================================
+
 def detect_investor_category(
-    text: str
+    text: str,
 ) -> str:
 
-    text = normalize_text(text)
+    text = normalize_text(
+        text
+    )
 
     scores = {
         "VC": 0,
@@ -1746,28 +2108,42 @@ def detect_investor_category(
         ],
     }
 
-    for category, keywords in category_keywords.items():
+    for category, keywords in (
+        category_keywords.items()
+    ):
 
         for keyword in keywords:
 
             if keyword in text:
-                scores[category] += 1
+                scores[
+                    category
+                ] += 1
 
     best_category = max(
         scores,
-        key=scores.get
+        key=scores.get,
     )
 
-    if scores[best_category] == 0:
+    if scores[
+        best_category
+    ] == 0:
+
         return "INVESTOR"
 
     return best_category
 
+
+# ============================================================
+# INVESTMENT STAGE
+# ============================================================
+
 def detect_investment_stage(
-    text: str
+    text: str,
 ) -> str:
 
-    text = normalize_text(text)
+    text = normalize_text(
+        text
+    )
 
     stages = []
 
@@ -1775,49 +2151,67 @@ def detect_investment_stage(
         "pre-seed" in text
         or "pre seed" in text
     ):
-        stages.append("Pre-seed")
+        stages.append(
+            "Pre-seed"
+        )
 
     if "seed" in text:
-        stages.append("Seed")
+        stages.append(
+            "Seed"
+        )
 
     if (
         "early stage" in text
         or "early-stage" in text
     ):
-        stages.append("Early Stage")
+        stages.append(
+            "Early Stage"
+        )
 
     if not stages:
         return "Unknown"
 
-    # Remove duplicates while preserving order.
     return " / ".join(
-        dict.fromkeys(stages)
+        dict.fromkeys(
+            stages
+        )
     )
+
+
+# ============================================================
+# CONFIDENCE
+# ============================================================
 
 def calculate_confidence(
     text: str,
     relevance: float,
     category: str,
     stage: str,
+    verification_score: float,
+    discovery_count: int,
 ) -> float:
 
-    confidence = 0.30
+    confidence = 0.25
 
-    # Tavily relevance
     confidence += min(
-        relevance * 0.30,
-        0.30
+        relevance * 0.20,
+        0.20,
     )
 
-    # Investor category
+    confidence += min(
+        verification_score * 0.35,
+        0.35,
+    )
+
     if category != "INVESTOR":
-        confidence += 0.15
+        confidence += 0.08
 
-    # Stage evidence
     if stage != "Unknown":
-        confidence += 0.10
+        confidence += 0.07
 
-    # Investment evidence
+    if discovery_count >= 2:
+        confidence += 0.05
+
     if any(
         term in text
         for term in [
@@ -1828,9 +2222,8 @@ def calculate_confidence(
             "funding",
         ]
     ):
-        confidence += 0.10
+        confidence += 0.05
 
-    # India evidence
     if any(
         term in text
         for term in [
@@ -1841,9 +2234,428 @@ def calculate_confidence(
         confidence += 0.05
 
     return round(
-        min(confidence, 0.99),
-        2
+        min(
+            confidence,
+            0.99,
+        ),
+        2,
     )
+
+
+# ============================================================
+# BUILD FINAL INVESTOR
+# ============================================================
+
+def build_investor_from_candidate(
+    candidate: Dict[str, Any],
+    user_query: str,
+) -> Optional[Dict[str, Any]]:
+
+    candidate_name = candidate.get(
+        "name",
+        "",
+    )
+
+    if not is_probable_organization_name(
+        candidate_name
+    ):
+        return None
+
+    best_result = candidate.get(
+        "best_result"
+    )
+
+    if not best_result:
+        return None
+
+    title = best_result.get(
+        "title",
+        "",
+    )
+
+    content = best_result.get(
+        "content",
+        "",
+    )
+
+    raw_content = best_result.get(
+        "raw_content",
+        "",
+    )
+
+    url = best_result.get(
+        "url",
+        "",
+    )
+
+    combined_text = normalize_text(
+        f"{candidate_name} "
+        f"{title} "
+        f"{content} "
+        f"{raw_content[:8000]}"
+    )
+
+    category = detect_investor_category(
+        combined_text
+    )
+
+    # Prefer discovery category when
+    # Tavily evidence is ambiguous.
+    if category == "INVESTOR":
+
+        category = candidate.get(
+            "category",
+            "INVESTOR",
+        )
+
+    stage = detect_investment_stage(
+        combined_text
+    )
+
+    relevance = calculate_relevance(
+        best_result,
+        category,
+        user_query,
+    )
+
+    source_quality = (
+        calculate_source_quality(
+            best_result
+        )
+    )
+
+    verification_score = float(
+        candidate.get(
+            "verification_score",
+            0,
+        )
+    )
+
+    discovery_count = int(
+        candidate.get(
+            "discovery_count",
+            1,
+        )
+    )
+
+    confidence = calculate_confidence(
+        combined_text,
+        relevance,
+        category,
+        stage,
+        verification_score,
+        discovery_count,
+    )
+
+    # Strong verification bonus.
+    if candidate.get(
+        "verified",
+        False,
+    ):
+        confidence = round(
+            min(
+                confidence + 0.08,
+                0.99,
+            ),
+            2,
+        )
+
+    description = (
+        content[:700]
+        if content
+        else ""
+    )
+
+    evidence = (
+        content[:1500]
+        if content
+        else raw_content[:1500]
+    )
+
+    # --------------------------------------------------------
+    # Provider status
+    # --------------------------------------------------------
+
+    if candidate.get(
+        "verified",
+        False,
+    ):
+
+        verification_status = (
+            "EXA_TAVILY_VERIFIED"
+        )
+
+    else:
+
+        verification_status = (
+            "EXA_DISCOVERED"
+        )
+
+    return {
+
+        "name": candidate_name,
+
+        "normalized_name": normalize_name(
+            candidate_name
+        ),
+
+        "type": category,
+
+        "country": detect_geography(
+            user_query
+        ),
+
+        "stage": stage,
+
+        "description": description,
+
+        "evidence": evidence,
+
+        "confidence": confidence,
+
+        "relevance": round(
+            relevance,
+            3,
+        ),
+
+        "source_quality": round(
+            source_quality,
+            3,
+        ),
+
+        "verification_score": round(
+            verification_score,
+            3,
+        ),
+
+        "verification_status": (
+            verification_status
+        ),
+
+        "providers": [
+            "exa",
+            "tavily",
+        ],
+
+        "discovery_count": (
+            discovery_count
+        ),
+
+        "url": url,
+
+        "source": (
+            "Exa + Tavily"
+            if candidate.get(
+                "verified",
+                False,
+            )
+            else "Exa"
+        ),
+
+        "discovery_source": "Exa",
+
+        "verification_source": (
+            "Tavily"
+            if candidate.get(
+                "verified",
+                False,
+            )
+            else None
+        ),
+
+        "search_query": user_query,
+    }
+
+
+# ============================================================
+# BUILD FINAL RESULTS
+# ============================================================
+
+def build_investor_results(
+    verified_candidates: List[
+        Dict[str, Any]
+    ],
+    user_query: str,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+
+    investors = []
+
+    seen_names = set()
+
+    for candidate in verified_candidates:
+
+        # We want verified organizations first.
+        # However, retain Exa discoveries when
+        # they have meaningful evidence.
+        if not candidate.get(
+            "verified",
+            False,
+        ):
+
+            if candidate.get(
+                "verification_score",
+                0,
+            ) < 0.40:
+
+                continue
+
+        investor = (
+            build_investor_from_candidate(
+                candidate,
+                user_query,
+            )
+        )
+
+        if not investor:
+            continue
+
+        normalized_name = investor[
+            "normalized_name"
+        ]
+
+        if normalized_name in seen_names:
+            continue
+
+        # Stronger final filtering.
+        if (
+            investor["confidence"] < 0.50
+        ):
+            continue
+
+        if (
+            investor["relevance"] < 0.35
+        ):
+            continue
+
+        seen_names.add(
+            normalized_name
+        )
+
+        investors.append(
+            investor
+        )
+
+        if len(investors) >= limit:
+            break
+
+    # Highest confidence first.
+    investors.sort(
+        key=lambda item: (
+            item.get(
+                "verification_status",
+                "",
+            )
+            == "EXA_TAVILY_VERIFIED",
+
+            item.get(
+                "confidence",
+                0,
+            ),
+
+            item.get(
+                "relevance",
+                0,
+            ),
+        ),
+        reverse=True,
+    )
+
+    return investors
+
+
+# ============================================================
+# COMPLETE SEARCH PIPELINE
+# ============================================================
+
+async def search_web(
+    query: str,
+) -> List[Dict[str, Any]]:
+
+    print(
+        "\n"
+        "=================================================="
+    )
+
+    print(
+        f"🔎 Connecting the Dots research: "
+        f"{query}"
+    )
+
+    print(
+        "=================================================="
+    )
+
+    # --------------------------------------------------------
+    # STEP 1
+    # Exa discovers organizations.
+    # --------------------------------------------------------
+
+    candidates = (
+        await discover_candidates(
+            query
+        )
+    )
+
+    if not candidates:
+
+        print(
+            "⚠️ Exa found no candidates."
+        )
+
+        return []
+
+    # --------------------------------------------------------
+    # STEP 2
+    # Tavily verifies candidates.
+    # --------------------------------------------------------
+
+    verified_candidates = (
+        await verify_candidates(
+            candidates,
+            query,
+        )
+    )
+
+    # --------------------------------------------------------
+    # STEP 3
+    # Convert into final organizations.
+    # --------------------------------------------------------
+
+    investors = (
+        build_investor_results(
+            verified_candidates,
+            query,
+            limit=50,
+        )
+    )
+
+    print(
+        "\n"
+        "=================================================="
+    )
+
+    print(
+        f"✅ Final organizations: "
+        f"{len(investors)}"
+    )
+
+    print(
+        "=================================================="
+    )
+
+    for investor in investors:
+
+        print(
+            f"   ✓ {investor['name']} "
+            f"| {investor['type']} "
+            f"| confidence="
+            f"{investor['confidence']} "
+            f"| status="
+            f"{investor['verification_status']}"
+        )
+
+    return investors
 
 
 # ============================================================
@@ -1851,23 +2663,19 @@ def calculate_confidence(
 # ============================================================
 
 async def research_query(
-    query: str
+    query: str,
 ) -> Dict[str, Any]:
 
-    # --------------------------------------------------------
-    # Search
-    # --------------------------------------------------------
-
-    search_results = await search_web(
+    investors = await search_web(
         query
     )
 
-    if not search_results:
+    if not investors:
 
         return {
             "answer": (
-                "No relevant investor results "
-                "were found."
+                "No verified investor "
+                "organizations were found."
             ),
 
             "entities": [],
@@ -1879,19 +2687,15 @@ async def research_query(
             "investors": [],
 
             "citations": [],
+
+            "providers": {
+                "exa": True,
+                "tavily": True,
+            },
         }
 
     # --------------------------------------------------------
-    # Build investors
-    # --------------------------------------------------------
-
-    investors = build_investor_results(
-        search_results,
-        limit=50,
-    )
-
-    # --------------------------------------------------------
-    # Group by category
+    # Category counts
     # --------------------------------------------------------
 
     category_counts = {}
@@ -1900,29 +2704,76 @@ async def research_query(
 
         category = investor.get(
             "type",
-            "UNKNOWN"
+            "UNKNOWN",
         )
 
-        category_counts[category] = (
+        category_counts[
+            category
+        ] = (
             category_counts.get(
                 category,
-                0
-            ) + 1
+                0,
+            )
+            + 1
         )
 
     # --------------------------------------------------------
-    # Generate human-readable answer
+    # Verification counts
+    # --------------------------------------------------------
+
+    verified_count = sum(
+        1
+        for investor in investors
+        if investor.get(
+            "verification_status"
+        )
+        == "EXA_TAVILY_VERIFIED"
+    )
+
+    exa_only_count = sum(
+        1
+        for investor in investors
+        if investor.get(
+            "verification_status"
+        )
+        == "EXA_DISCOVERED"
+    )
+
+    # --------------------------------------------------------
+    # Human-readable answer
     # --------------------------------------------------------
 
     answer_parts = []
 
     answer_parts.append(
-        f"Found {len(investors)} potentially "
-        f"relevant investor organizations for:"
+        f"Found {len(investors)} "
+        f"potentially relevant investor "
+        f"organizations for:"
     )
 
     answer_parts.append(
         f'"{query}"'
+    )
+
+    answer_parts.append("")
+
+    answer_parts.append(
+        "Provider pipeline:"
+    )
+
+    answer_parts.append(
+        f"- Exa discovery: "
+        f"{len(investors)} candidates"
+    )
+
+    answer_parts.append(
+        f"- Exa + Tavily verified: "
+        f"{verified_count}"
+    )
+
+    answer_parts.append(
+        f"- Exa discovered only: "
+        f"{exa_only_count}"
     )
 
     answer_parts.append("")
@@ -1935,7 +2786,7 @@ async def research_query(
 
         for category, count in sorted(
             category_counts.items(),
-            key=lambda x: x[1],
+            key=lambda item: item[1],
             reverse=True,
         ):
 
@@ -1943,19 +2794,22 @@ async def research_query(
                 f"- {category}: {count}"
             )
 
-    answer_parts.append("")
+        answer_parts.append("")
 
     answer_parts.append(
-        "Organizations identified from the search evidence:"
+        "Organizations identified "
+        "from search evidence:"
     )
 
-    for investor in investors[:15]:
+    for investor in investors[:20]:
+
         answer_parts.append(
             f"- {investor['name']} "
             f"({investor['type']}, "
             f"{investor['stage']}) "
             f"[confidence: "
-            f"{investor['confidence']}]"
+            f"{investor['confidence']}] "
+            f"[{investor['verification_status']}]"
         )
 
     answer = "\n".join(
@@ -1968,48 +2822,67 @@ async def research_query(
 
     citations = []
 
-    for result in search_results[:30]:
+    seen_urls = set()
 
-        url = result.get(
+    for investor in investors:
+
+        url = investor.get(
             "url",
-            ""
+            "",
         )
 
         if not url:
             continue
 
+        if url in seen_urls:
+            continue
+
+        seen_urls.add(
+            url
+        )
+
         citations.append({
+
             "source": url,
 
-            "title": result.get(
-                "title",
-                ""
+            "title": investor.get(
+                "name",
+                "",
             ),
 
-            "content": result.get(
-                "content",
-                ""
+            "content": investor.get(
+                "evidence",
+                "",
             )[:500],
 
-            "relevance": round(
-                result.get(
-                    "relevance",
-                    0
-                ),
-                3,
+            "relevance": investor.get(
+                "relevance",
+                0,
             ),
 
-            "category": result.get(
-                "category",
-                ""
+            "confidence": investor.get(
+                "confidence",
+                0,
+            ),
+
+            "provider": investor.get(
+                "source",
+                "",
+            ),
+
+            "verification_status": (
+                investor.get(
+                    "verification_status",
+                    "",
+                )
             ),
         })
 
-    # --------------------------------------------------------
-    # Return
-    # --------------------------------------------------------
+        if len(citations) >= 30:
+            break
 
     return {
+
         "answer": answer,
 
         "entities": investors,
@@ -2021,6 +2894,23 @@ async def research_query(
         "investors": investors,
 
         "citations": citations,
+
+        "providers": {
+            "exa": True,
+            "tavily": True,
+        },
+
+        "stats": {
+            "total_organizations": len(
+                investors
+            ),
+
+            "verified": verified_count,
+
+            "exa_only": exa_only_count,
+
+            "categories": category_counts,
+        },
     }
 
 
@@ -2028,23 +2918,40 @@ async def research_query(
 # API
 # ============================================================
 
-@app.post("/api/research")
+@app.post(
+    "/api/research"
+)
 async def perform_research(
-    request: ResearchRequest
+    request: ResearchRequest,
 ):
 
     try:
 
+        query = (
+            request.query
+            or ""
+        ).strip()
+
+        if not query:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Query cannot be empty."
+                ),
+            )
+
         print(
             f"🚀 Research request: "
-            f"{request.query}"
+            f"{query}"
         )
 
         results = await research_query(
-            request.query
+            query
         )
 
         return {
+
             "research_run_id": str(
                 uuid.uuid4()
             ),
@@ -2052,26 +2959,31 @@ async def perform_research(
             "status": "completed",
 
             "results": {
-                "query": request.query,
+
+                "query": query,
 
                 "response": results,
 
                 "sources": results.get(
                     "citations",
-                    []
+                    [],
                 ),
             },
         }
 
-    except Exception as e:
+    except HTTPException:
+        raise
+
+    except Exception as exc:
 
         print(
-            f"❌ Research error: {e}"
+            f"❌ Research error: "
+            f"{exc}"
         )
 
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail=str(exc),
         )
 
 
@@ -2079,19 +2991,50 @@ async def perform_research(
 # HEALTH
 # ============================================================
 
-@app.get("/api/health")
+@app.get(
+    "/api/health"
+)
 async def health_check():
 
     return {
+
         "status": "healthy",
 
-        "mode": "tavily",
+        "mode": "exa+tavily",
 
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.utcnow()
+        .isoformat(),
+
+        "exa_configured": bool(
+            EXA_API_KEY
+        ),
 
         "tavily_configured": bool(
             TAVILY_API_KEY
         ),
+
+        "providers": {
+
+            "exa": {
+                "configured": bool(
+                    EXA_API_KEY
+                ),
+
+                "role": (
+                    "entity discovery"
+                ),
+            },
+
+            "tavily": {
+                "configured": bool(
+                    TAVILY_API_KEY
+                ),
+
+                "role": (
+                    "evidence verification"
+                ),
+            },
+        },
     }
 
 
@@ -2099,7 +3042,9 @@ async def health_check():
 # ENTITY SEARCH
 # ============================================================
 
-@app.get("/api/entities/search")
+@app.get(
+    "/api/entities/search"
+)
 async def search_entities(
     query: str,
     limit: int = 10,
@@ -2107,24 +3052,63 @@ async def search_entities(
 
     try:
 
-        results = await search_web(
+        query = (
+            query
+            or ""
+        ).strip()
+
+        if not query:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Query cannot be empty."
+                ),
+            )
+
+        if limit < 1:
+            limit = 1
+
+        if limit > 100:
+            limit = 100
+
+        investors = await search_web(
             query
         )
 
-        investors = build_investor_results(
-            results,
-            limit=limit,
-        )
+        investors = investors[
+            :limit
+        ]
 
         return {
-            "entities": investors
+
+            "query": query,
+
+            "entities": investors,
+
+            "count": len(
+                investors
+            ),
+
+            "providers": {
+                "exa": True,
+                "tavily": True,
+            },
         }
 
-    except Exception as e:
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+
+        print(
+            f"❌ Entity search error: "
+            f"{exc}"
+        )
 
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail=str(exc),
         )
 
 
@@ -2136,13 +3120,24 @@ async def search_entities(
 async def root():
 
     return {
-        "message": "Connecting the Dots AI",
+
+        "message": (
+            "Connecting the Dots AI"
+        ),
+
+        "version": "2.0.0",
 
         "docs": "/docs",
 
         "health": "/api/health",
 
-        "mode": "tavily",
+        "mode": "exa+tavily",
+
+        "pipeline": (
+            "Exa discovery -> "
+            "Tavily verification -> "
+            "entity scoring"
+        ),
     }
 
 
