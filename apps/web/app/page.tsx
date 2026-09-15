@@ -2,7 +2,19 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
+// ---------- Types matching the ACTUAL backend response ----------
+
+interface EvidenceItem {
+  url: string;
+  title: string;
+  content: string;
+  quality: number;
+  search_query?: string;
+  signals?: Record<string, number>;
+}
+
 interface Entity {
+  id?: string;
   name: string;
   type: string;
   normalized_name?: string;
@@ -10,19 +22,31 @@ interface Entity {
   country?: string;
   stage?: string;
   confidence: number;
-  evidence: string;
+  evidence: EvidenceItem[] | string;
   relevance?: number;
   source_quality?: number;
   url?: string;
+  verification_status?: string;
+  verification_score?: number;
+  final_score?: number;
+  relationship?: string;
 }
 
 interface Relationship {
+  id?: string;
   source: string;
-  relationship: string;
   target: string;
+  source_name?: string;
+  target_name?: string;
+  source_type?: string;
+  target_type?: string;
+  relationship: string;
   confidence: number;
-  status: string;
-  evidence: string;
+  status?: string;
+  verification_status?: string;
+  geography?: string;
+  stage?: string;
+  evidence: EvidenceItem[] | string;
 }
 
 interface Opportunity {
@@ -31,13 +55,16 @@ interface Opportunity {
   entities: string[];
   actionable: boolean;
   potential_value?: string;
-  evidence: string;
+  evidence: string | EvidenceItem[];
 }
 
 interface Citation {
-  source: string;
+  url?: string;
+  source?: string;
+  title?: string;
   content: string;
-  relevance: number;
+  relevance?: number;
+  quality?: number;
 }
 
 interface ResearchResponse {
@@ -55,9 +82,12 @@ interface ResearchResult {
     query: string;
     response: ResearchResponse;
     sources?: Array<{
-      type: string;
+      type?: string;
+      url?: string;
+      title?: string;
       content: string;
-      relevance: number;
+      relevance?: number;
+      quality?: number;
     }>;
   };
 }
@@ -68,7 +98,8 @@ type Tab =
   | 'opportunities'
   | 'sources';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 const GENERIC_RESULT_PATTERNS = [
   /^top\s+/i,
@@ -204,6 +235,11 @@ function getStatusStyle(status: string) {
       color: '#166534',
       icon: '✓',
     },
+    STRONGLY_VERIFIED: {
+      background: '#dcfce7',
+      color: '#166534',
+      icon: '✓',
+    },
     SUPPORTED: {
       background: '#dbeafe',
       color: '#1d4ed8',
@@ -235,6 +271,45 @@ function getStatusStyle(status: string) {
   );
 }
 
+/**
+ * Safely render evidence that may be a string OR an array of
+ * EvidenceItem objects. Returns a plain string suitable for rendering.
+ */
+function evidenceToString(
+  evidence: EvidenceItem[] | string | undefined | null
+): string {
+  if (!evidence) return '';
+  if (typeof evidence === 'string') return evidence;
+
+  if (Array.isArray(evidence)) {
+    return evidence
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (!item) return '';
+        const title = item.title ? `${item.title}: ` : '';
+        const content = item.content || '';
+        return `${title}${content}`.trim();
+      })
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  return '';
+}
+
+/**
+ * Get the primary URL from an evidence (array or string).
+ */
+function primaryEvidenceUrl(
+  evidence: EvidenceItem[] | string | undefined | null
+): string | undefined {
+  if (!evidence || typeof evidence === 'string') return undefined;
+  if (Array.isArray(evidence) && evidence.length > 0) {
+    return evidence[0]?.url;
+  }
+  return undefined;
+}
+
 export default function Home() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -244,30 +319,39 @@ export default function Home() {
   const [selectedOrganization, setSelectedOrganization] =
     useState<Entity | null>(null);
 
+  const [backendOnline, setBackendOnline] = useState(false);
+  const [mode, setMode] = useState('unknown');
+
   useEffect(() => {
     let cancelled = false;
 
-    const checkHealth = async () => {
+    const checkBackend = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/health`);
+        const response = await fetch(`${API_BASE_URL}/api/health`, {
+          cache: 'no-store',
+        });
 
         if (!response.ok) {
-          throw new Error('Backend unavailable');
+          throw new Error(`HTTP ${response.status}`);
         }
 
         const data = await response.json();
 
         if (!cancelled) {
+          setBackendOnline(true);
           setMode(data.mode || 'unknown');
         }
-      } catch {
+      } catch (err) {
+        console.error('Health check failed:', err);
+
         if (!cancelled) {
-          setMode('offline');
+          setBackendOnline(false);
+          setMode('unknown');
         }
       }
     };
 
-    checkHealth();
+    checkBackend();
 
     return () => {
       cancelled = true;
@@ -285,7 +369,6 @@ export default function Home() {
       .filter((entity) => {
         if (!entity.name) return false;
         if (isLikelyGenericResult(entity.name)) return false;
-
         return true;
       });
 
@@ -357,9 +440,7 @@ export default function Home() {
       setResult(data);
     } catch (err: unknown) {
       const message =
-        err instanceof Error
-          ? err.message
-          : 'Failed to perform research';
+        err instanceof Error ? err.message : 'Failed to perform research';
 
       setError(message);
     } finally {
@@ -372,52 +453,6 @@ export default function Home() {
     'Find early-stage VC investors backing startups in India',
     'Find UAE distributors for Indian food manufacturers',
   ];
-
-  const [backendOnline, setBackendOnline] = useState(false);
-  const [mode, setMode] = useState('unknown');
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const checkBackend = async () => {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/health`,
-          {
-            cache: 'no-store',
-          }
-        );
-
-        if (!response.ok) {
-          throw new Error(
-            `HTTP ${response.status}`
-          );
-        }
-
-        const data = await response.json();
-
-        console.log('Health check:', data);
-
-        if (!cancelled) {
-          setBackendOnline(true);
-          setMode(data.mode || 'unknown');
-        }
-      } catch (error) {
-        console.error('Health check failed:', error);
-
-        if (!cancelled) {
-          setBackendOnline(false);
-          setMode('unknown');
-        }
-      }
-    };
-
-    checkBackend();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   return (
     <main
@@ -576,19 +611,13 @@ export default function Home() {
               marginTop: 16,
               padding: '6px 12px',
               borderRadius: 999,
-              background: backendOnline
-                ? '#dcfce7'
-                : '#fee2e2',
-              color: backendOnline
-                ? '#166534'
-                : '#991b1b',
+              background: backendOnline ? '#dcfce7' : '#fee2e2',
+              color: backendOnline ? '#166534' : '#991b1b',
               fontSize: 12,
               fontWeight: 700,
             }}
           >
-            <span>
-              {backendOnline ? '●' : '○'}
-            </span>
+            <span>{backendOnline ? '●' : '○'}</span>
 
             {backendOnline
               ? mode === 'mock'
@@ -648,14 +677,10 @@ export default function Home() {
                       ? '#e2e8f0'
                       : 'linear-gradient(135deg, #4f46e5, #7c3aed)',
                   color:
-                    loading || !query.trim()
-                      ? '#94a3b8'
-                      : '#ffffff',
+                    loading || !query.trim() ? '#94a3b8' : '#ffffff',
                   fontWeight: 700,
                   cursor:
-                    loading || !query.trim()
-                      ? 'not-allowed'
-                      : 'pointer',
+                    loading || !query.trim() ? 'not-allowed' : 'pointer',
                 }}
               >
                 {loading ? '⏳ Researching...' : '🔍 Research'}
@@ -708,9 +733,7 @@ export default function Home() {
             }}
           >
             <strong>Research failed</strong>
-            <div style={{ marginTop: 5, fontSize: 14 }}>
-              {error}
-            </div>
+            <div style={{ marginTop: 5, fontSize: 14 }}>{error}</div>
           </div>
         )}
 
@@ -737,9 +760,7 @@ export default function Home() {
               }}
             />
 
-            <h3 style={{ margin: '20px 0 6px' }}>
-              Mapping your query
-            </h3>
+            <h3 style={{ margin: '20px 0 6px' }}>Mapping your query</h3>
 
             <p
               style={{
@@ -760,70 +781,6 @@ export default function Home() {
               animation: 'fadeIn 0.35s ease',
             }}
           >
-            {/* Query summary */}
-            {/* <section
-              style={{
-                padding: 22,
-                marginBottom: 18,
-                background: '#ffffff',
-                border: '1px solid #e2e8f0',
-                borderRadius: 16,
-              }}
-            >
-              <div
-                style={{
-                  color: '#64748b',
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: 'uppercase',
-                  letterSpacing: 0.7,
-                }}
-              >
-                Research query
-              </div>
-
-              <div
-                style={{
-                  marginTop: 7,
-                  fontSize: 19,
-                  fontWeight: 700,
-                  color: '#0f172a',
-                  lineHeight: 1.35,
-                }}
-              >
-                {result.results?.name || 'Unnamed organization'}
-              </div>
-
-              <div
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  marginTop: 6,
-                  padding: '3px 9px',
-                  borderRadius: 999,
-                  background: '#f1f5f9',
-                  color: '#475569',
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                {result.results?.type || 'Organization'}
-              </div>
-
-              <p
-                style={{
-                  margin: '10px 0 0',
-                  color: '#475569',
-                  fontSize: 15,
-                  lineHeight: 1.7,
-                }}
-              >
-                {result.results?.description ||
-                  result.results?.response?.answer ||
-                  'Research completed.'}
-              </p>
-            </section> */}
-
             {/* Stats */}
             <div
               className="stats-grid"
@@ -933,15 +890,10 @@ export default function Home() {
                     borderRadius: 9,
                     padding: '11px 14px',
                     background:
-                      activeTab === tab.id
-                        ? '#ffffff'
-                        : 'transparent',
+                      activeTab === tab.id ? '#ffffff' : 'transparent',
                     color:
-                      activeTab === tab.id
-                        ? '#312e81'
-                        : '#64748b',
-                    fontWeight:
-                      activeTab === tab.id ? 700 : 500,
+                      activeTab === tab.id ? '#312e81' : '#64748b',
+                    fontWeight: activeTab === tab.id ? 700 : 500,
                     cursor: 'pointer',
                     boxShadow:
                       activeTab === tab.id
@@ -994,12 +946,7 @@ export default function Home() {
                     }}
                   >
                     <div>
-                      <h2
-                        style={{
-                          margin: 0,
-                          fontSize: 22,
-                        }}
-                      >
+                      <h2 style={{ margin: 0, fontSize: 22 }}>
                         Organizations identified
                       </h2>
 
@@ -1010,8 +957,8 @@ export default function Home() {
                           fontSize: 13,
                         }}
                       >
-                        Individual organizations extracted from the
-                        research evidence.
+                        Individual organizations extracted from the research
+                        evidence.
                       </p>
                     </div>
 
@@ -1066,12 +1013,12 @@ export default function Home() {
                       }}
                     >
                       {organizations.map((organization, index) => {
-                        const confidence =
-                          organization.confidence || 0;
+                        const confidence = organization.confidence || 0;
 
                         return (
                           <button
                             key={
+                              organization.id ||
                               organization.normalized_name ||
                               `${organization.name}-${index}`
                             }
@@ -1117,9 +1064,7 @@ export default function Home() {
                                     fontSize: 21,
                                   }}
                                 >
-                                  {getEntityIcon(
-                                    organization.type
-                                  )}
+                                  {getEntityIcon(organization.type)}
                                 </div>
 
                                 <div style={{ minWidth: 0 }}>
@@ -1141,9 +1086,7 @@ export default function Home() {
                                       fontSize: 12,
                                     }}
                                   >
-                                    {getTypeLabel(
-                                      organization.type
-                                    )}
+                                    {getTypeLabel(organization.type)}
                                   </div>
                                 </div>
                               </div>
@@ -1156,8 +1099,7 @@ export default function Home() {
                                   background: `${getConfidenceColor(
                                     confidence
                                   )}12`,
-                                  color:
-                                    getConfidenceColor(confidence),
+                                  color: getConfidenceColor(confidence),
                                   fontSize: 11,
                                   fontWeight: 700,
                                 }}
@@ -1232,8 +1174,7 @@ export default function Home() {
                               style={{
                                 marginTop: 14,
                                 paddingTop: 12,
-                                borderTop:
-                                  '1px solid #f1f5f9',
+                                borderTop: '1px solid #f1f5f9',
                                 color: '#4f46e5',
                                 fontSize: 12,
                                 fontWeight: 700,
@@ -1252,14 +1193,7 @@ export default function Home() {
               {/* Relationships */}
               {activeTab === 'relationships' && (
                 <div>
-                  <h2
-                    style={{
-                      margin: 0,
-                      fontSize: 22,
-                    }}
-                  >
-                    Connections
-                  </h2>
+                  <h2 style={{ margin: 0, fontSize: 22 }}>Connections</h2>
 
                   <p
                     style={{
@@ -1268,8 +1202,7 @@ export default function Home() {
                       fontSize: 13,
                     }}
                   >
-                    Relationships discovered between individual
-                    entities.
+                    Relationships discovered between individual entities.
                   </p>
 
                   {relationships.length === 0 ? (
@@ -1281,12 +1214,31 @@ export default function Home() {
                   ) : (
                     relationships.map((relationship, index) => {
                       const status = getStatusStyle(
-                        relationship.status
+                        relationship.verification_status ||
+                          relationship.status ||
+                          ''
+                      );
+
+                      const sourceName =
+                        relationship.source_name ||
+                        relationship.source ||
+                        'Unknown';
+
+                      const targetName =
+                        relationship.target_name ||
+                        relationship.target ||
+                        'Unknown';
+
+                      const evidenceText = evidenceToString(
+                        relationship.evidence
                       );
 
                       return (
                         <div
-                          key={`${relationship.source}-${relationship.target}-${index}`}
+                          key={
+                            relationship.id ||
+                            `${relationship.source}-${relationship.target}-${index}`
+                          }
                           className="research-card"
                           style={{
                             padding: 18,
@@ -1303,9 +1255,7 @@ export default function Home() {
                               flexWrap: 'wrap',
                             }}
                           >
-                            <strong>
-                              {relationship.source}
-                            </strong>
+                            <strong>{sourceName}</strong>
 
                             <span
                               style={{
@@ -1317,12 +1267,15 @@ export default function Home() {
                                 fontWeight: 700,
                               }}
                             >
-                              → {relationship.relationship} →
+                              →{' '}
+                              {String(relationship.relationship).replace(
+                                /_/g,
+                                ' '
+                              )}{' '}
+                              →
                             </span>
 
-                            <strong>
-                              {relationship.target}
-                            </strong>
+                            <strong>{targetName}</strong>
                           </div>
 
                           <div
@@ -1333,18 +1286,49 @@ export default function Home() {
                               flexWrap: 'wrap',
                             }}
                           >
-                            <span
-                              style={{
-                                padding: '4px 8px',
-                                borderRadius: 7,
-                                background: status.background,
-                                color: status.color,
-                                fontSize: 11,
-                                fontWeight: 700,
-                              }}
-                            >
-                              {status.icon} {relationship.status}
-                            </span>
+                            {relationship.verification_status && (
+                              <span
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: 7,
+                                  background: status.background,
+                                  color: status.color,
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                {status.icon}{' '}
+                                {relationship.verification_status}
+                              </span>
+                            )}
+
+                            {relationship.geography && (
+                              <span
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: 7,
+                                  background: '#f1f5f9',
+                                  color: '#475569',
+                                  fontSize: 11,
+                                }}
+                              >
+                                🌍 {relationship.geography}
+                              </span>
+                            )}
+
+                            {relationship.stage && (
+                              <span
+                                style={{
+                                  padding: '4px 8px',
+                                  borderRadius: 7,
+                                  background: '#f1f5f9',
+                                  color: '#475569',
+                                  fontSize: 11,
+                                }}
+                              >
+                                🎯 {relationship.stage}
+                              </span>
+                            )}
 
                             <span
                               style={{
@@ -1356,19 +1340,12 @@ export default function Home() {
                               }}
                             >
                               Confidence:{' '}
-                              {(
-                                relationship.confidence * 100
-                              ).toFixed(0)}
-                              %
+                              {(relationship.confidence * 100).toFixed(0)}%
                             </span>
                           </div>
 
-                          {relationship.evidence && (
-                            <details
-                              style={{
-                                marginTop: 13,
-                              }}
-                            >
+                          {evidenceText && (
+                            <details style={{ marginTop: 13 }}>
                               <summary
                                 style={{
                                   cursor: 'pointer',
@@ -1389,9 +1366,10 @@ export default function Home() {
                                   color: '#475569',
                                   fontSize: 13,
                                   lineHeight: 1.6,
+                                  whiteSpace: 'pre-wrap',
                                 }}
                               >
-                                {relationship.evidence}
+                                {evidenceText}
                               </p>
                             </details>
                           )}
@@ -1405,14 +1383,7 @@ export default function Home() {
               {/* Opportunities */}
               {activeTab === 'opportunities' && (
                 <div>
-                  <h2
-                    style={{
-                      margin: 0,
-                      fontSize: 22,
-                    }}
-                  >
-                    Opportunities
-                  </h2>
+                  <h2 style={{ margin: 0, fontSize: 22 }}>Opportunities</h2>
 
                   <p
                     style={{
@@ -1421,8 +1392,8 @@ export default function Home() {
                       fontSize: 13,
                     }}
                   >
-                    Potentially actionable connections discovered
-                    from the research.
+                    Potentially actionable connections discovered from the
+                    research.
                   </p>
 
                   {opportunities.length === 0 ? (
@@ -1432,79 +1403,82 @@ export default function Home() {
                       description="No actionable opportunities were identified from the available evidence."
                     />
                   ) : (
-                    opportunities.map((opportunity, index) => (
-                      <div
-                        key={index}
-                        className="research-card"
-                        style={{
-                          padding: 18,
-                          marginBottom: 12,
-                          border: '1px solid #e2e8f0',
-                          borderLeft: `4px solid ${
-                            opportunity.actionable
-                              ? '#16a34a'
-                              : '#f59e0b'
-                          }`,
-                          borderRadius: 12,
-                          background: opportunity.actionable
-                            ? '#f0fdf4'
-                            : '#fffbeb',
-                        }}
-                      >
+                    opportunities.map((opportunity, index) => {
+                      const evidenceText = evidenceToString(
+                        opportunity.evidence
+                      );
+
+                      return (
                         <div
+                          key={index}
+                          className="research-card"
                           style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            gap: 12,
-                            alignItems: 'flex-start',
+                            padding: 18,
+                            marginBottom: 12,
+                            border: '1px solid #e2e8f0',
+                            borderLeft: `4px solid ${
+                              opportunity.actionable
+                                ? '#16a34a'
+                                : '#f59e0b'
+                            }`,
+                            borderRadius: 12,
+                            background: opportunity.actionable
+                              ? '#f0fdf4'
+                              : '#fffbeb',
                           }}
                         >
-                          <p
-                            style={{
-                              margin: 0,
-                              fontSize: 15,
-                              lineHeight: 1.6,
-                              fontWeight: 600,
-                            }}
-                          >
-                            {opportunity.description}
-                          </p>
-
-                          {opportunity.actionable && (
-                            <span
-                              style={{
-                                flexShrink: 0,
-                                padding: '4px 8px',
-                                background: '#dcfce7',
-                                color: '#166534',
-                                borderRadius: 7,
-                                fontSize: 11,
-                                fontWeight: 700,
-                              }}
-                            >
-                              ACTIONABLE
-                            </span>
-                          )}
-                        </div>
-
-                        {opportunity.entities?.length > 0 && (
                           <div
                             style={{
-                              marginTop: 12,
                               display: 'flex',
-                              gap: 6,
-                              flexWrap: 'wrap',
+                              justifyContent: 'space-between',
+                              gap: 12,
+                              alignItems: 'flex-start',
                             }}
                           >
-                            {opportunity.entities.map(
-                              (entity) => (
+                            <p
+                              style={{
+                                margin: 0,
+                                fontSize: 15,
+                                lineHeight: 1.6,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {opportunity.description}
+                            </p>
+
+                            {opportunity.actionable && (
+                              <span
+                                style={{
+                                  flexShrink: 0,
+                                  padding: '4px 8px',
+                                  background: '#dcfce7',
+                                  color: '#166534',
+                                  borderRadius: 7,
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                ACTIONABLE
+                              </span>
+                            )}
+                          </div>
+
+                          {opportunity.entities?.length > 0 && (
+                            <div
+                              style={{
+                                marginTop: 12,
+                                display: 'flex',
+                                gap: 6,
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              {opportunity.entities.map((entity) => (
                                 <span
                                   key={entity}
                                   style={{
                                     padding: '5px 8px',
                                     background: '#ffffff',
-                                    border:
-                                      '1px solid #e2e8f0',
+                                    border: '1px solid #e2e8f0',
                                     borderRadius: 7,
                                     fontSize: 11,
                                     color: '#475569',
@@ -1512,59 +1486,53 @@ export default function Home() {
                                 >
                                   {entity}
                                 </span>
-                              )
-                            )}
-                          </div>
-                        )}
+                              ))}
+                            </div>
+                          )}
 
-                        <div
-                          style={{
-                            marginTop: 12,
-                            fontSize: 12,
-                            color: '#64748b',
-                          }}
-                        >
-                          Confidence:{' '}
-                          {(
-                            opportunity.confidence * 100
-                          ).toFixed(0)}
-                          %
-                        </div>
-
-                        {opportunity.evidence && (
-                          <details
+                          <div
                             style={{
                               marginTop: 12,
+                              fontSize: 12,
+                              color: '#64748b',
                             }}
                           >
-                            <summary
-                              style={{
-                                cursor: 'pointer',
-                                color: '#4f46e5',
-                                fontSize: 12,
-                                fontWeight: 600,
-                              }}
-                            >
-                              View evidence
-                            </summary>
+                            Confidence:{' '}
+                            {(opportunity.confidence * 100).toFixed(0)}%
+                          </div>
 
-                            <p
-                              style={{
-                                margin: '10px 0 0',
-                                padding: 12,
-                                background: '#ffffff',
-                                borderRadius: 8,
-                                color: '#475569',
-                                fontSize: 13,
-                                lineHeight: 1.6,
-                              }}
-                            >
-                              {opportunity.evidence}
-                            </p>
-                          </details>
-                        )}
-                      </div>
-                    ))
+                          {evidenceText && (
+                            <details style={{ marginTop: 12 }}>
+                              <summary
+                                style={{
+                                  cursor: 'pointer',
+                                  color: '#4f46e5',
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                }}
+                              >
+                                View evidence
+                              </summary>
+
+                              <p
+                                style={{
+                                  margin: '10px 0 0',
+                                  padding: 12,
+                                  background: '#ffffff',
+                                  borderRadius: 8,
+                                  color: '#475569',
+                                  fontSize: 13,
+                                  lineHeight: 1.6,
+                                  whiteSpace: 'pre-wrap',
+                                }}
+                              >
+                                {evidenceText}
+                              </p>
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               )}
@@ -1572,12 +1540,7 @@ export default function Home() {
               {/* Sources */}
               {activeTab === 'sources' && (
                 <div>
-                  <h2
-                    style={{
-                      margin: 0,
-                      fontSize: 22,
-                    }}
-                  >
+                  <h2 style={{ margin: 0, fontSize: 22 }}>
                     Evidence & Sources
                   </h2>
 
@@ -1588,8 +1551,8 @@ export default function Home() {
                       fontSize: 13,
                     }}
                   >
-                    These sources support the organizations and
-                    relationships shown above.
+                    These sources support the organizations and relationships
+                    shown above.
                   </p>
 
                   {citations.length === 0 ? (
@@ -1599,83 +1562,101 @@ export default function Home() {
                       description="No source evidence was returned by the research."
                     />
                   ) : (
-                    citations.map((citation, index) => (
-                      <div
-                        key={`${citation.source}-${index}`}
-                        style={{
-                          padding: 17,
-                          marginBottom: 12,
-                          border: '1px solid #e2e8f0',
-                          borderRadius: 12,
-                        }}
-                      >
+                    citations.map((citation, index) => {
+                      const sourceUrl = citation.url || citation.source;
+                      const relevance =
+                        citation.relevance ?? citation.quality ?? 0;
+
+                      return (
                         <div
+                          key={`${sourceUrl || 'source'}-${index}`}
                           style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            gap: 12,
-                            flexWrap: 'wrap',
+                            padding: 17,
+                            marginBottom: 12,
+                            border: '1px solid #e2e8f0',
+                            borderRadius: 12,
                           }}
                         >
                           <div
                             style={{
-                              minWidth: 0,
-                              fontWeight: 700,
-                              fontSize: 13,
-                              wordBreak: 'break-all',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              gap: 12,
+                              flexWrap: 'wrap',
                             }}
                           >
-                            📄 {citation.source ||
-                              'Unknown source'}
+                            <div
+                              style={{
+                                minWidth: 0,
+                                fontWeight: 700,
+                                fontSize: 13,
+                                wordBreak: 'break-all',
+                              }}
+                            >
+                              📄{' '}
+                              {citation.title ||
+                                sourceUrl ||
+                                'Unknown source'}
+                            </div>
+
+                            <span
+                              style={{
+                                padding: '4px 8px',
+                                background: '#eef2ff',
+                                color: '#4338ca',
+                                borderRadius: 7,
+                                fontSize: 11,
+                                fontWeight: 700,
+                              }}
+                            >
+                              {(relevance * 100).toFixed(0)}% relevant
+                            </span>
                           </div>
 
-                          <span
+                          {sourceUrl && sourceUrl !== citation.title && (
+                            <div
+                              style={{
+                                marginTop: 6,
+                                color: '#94a3b8',
+                                fontSize: 11,
+                                wordBreak: 'break-all',
+                              }}
+                            >
+                              {sourceUrl}
+                            </div>
+                          )}
+
+                          <p
                             style={{
-                              padding: '4px 8px',
-                              background: '#eef2ff',
-                              color: '#4338ca',
-                              borderRadius: 7,
-                              fontSize: 11,
-                              fontWeight: 700,
+                              margin: '11px 0 0',
+                              color: '#475569',
+                              fontSize: 13,
+                              lineHeight: 1.65,
                             }}
                           >
-                            {(citation.relevance * 100).toFixed(
-                              0
-                            )}
-                            % relevant
-                          </span>
+                            {citation.content}
+                          </p>
+
+                          {sourceUrl?.startsWith('http') && (
+                            <a
+                              href={sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-block',
+                                marginTop: 10,
+                                color: '#4f46e5',
+                                fontSize: 12,
+                                fontWeight: 700,
+                                textDecoration: 'none',
+                              }}
+                            >
+                              Open source →
+                            </a>
+                          )}
                         </div>
-
-                        <p
-                          style={{
-                            margin: '11px 0 0',
-                            color: '#475569',
-                            fontSize: 13,
-                            lineHeight: 1.65,
-                          }}
-                        >
-                          {citation.content}
-                        </p>
-
-                        {citation.source?.startsWith('http') && (
-                          <a
-                            href={citation.source}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{
-                              display: 'inline-block',
-                              marginTop: 10,
-                              color: '#4f46e5',
-                              fontSize: 12,
-                              fontWeight: 700,
-                              textDecoration: 'none',
-                            }}
-                          >
-                            Open source →
-                          </a>
-                        )}
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               )}
@@ -1694,13 +1675,9 @@ export default function Home() {
                 fontSize: 11,
               }}
             >
-              <span>
-                Research ID: {result.research_run_id}
-              </span>
+              <span>Research ID: {result.research_run_id}</span>
 
-              <span>
-                Status: {result.status}
-              </span>
+              <span>Status: {result.status}</span>
             </footer>
           </div>
         )}
@@ -1732,12 +1709,7 @@ export default function Home() {
               🔗
             </div>
 
-            <h2
-              style={{
-                margin: 0,
-                fontSize: 25,
-              }}
-            >
+            <h2 style={{ margin: 0, fontSize: 25 }}>
               Start connecting the dots
             </h2>
 
@@ -1749,10 +1721,9 @@ export default function Home() {
                 lineHeight: 1.7,
               }}
             >
-              Ask a question about a market, company, investor,
-              manufacturer or distributor. The system will search
-              the web, identify individual organizations and map
-              the relationships between them.
+              Ask a question about a market, company, investor, manufacturer
+              or distributor. The system will search the web, identify
+              individual organizations and map the relationships between them.
             </p>
 
             <div
@@ -1853,12 +1824,7 @@ export default function Home() {
               </div>
 
               <div>
-                <div
-                  style={{
-                    fontSize: 24,
-                    fontWeight: 800,
-                  }}
-                >
+                <div style={{ fontSize: 24, fontWeight: 800 }}>
                   {selectedOrganization.name}
                 </div>
 
@@ -1891,9 +1857,7 @@ export default function Home() {
 
               <InfoBox
                 label="Country"
-                value={
-                  selectedOrganization.country || 'Not specified'
-                }
+                value={selectedOrganization.country || 'Not specified'}
               />
 
               {selectedOrganization.stage && (
@@ -1903,13 +1867,13 @@ export default function Home() {
                 />
               )}
 
-              {selectedOrganization.source_quality !==
-                undefined && (
+              {selectedOrganization.verification_status && (
                 <InfoBox
-                  label="Source quality"
-                  value={`${(
-                    selectedOrganization.source_quality * 100
-                  ).toFixed(0)}%`}
+                  label="Verification"
+                  value={selectedOrganization.verification_status.replace(
+                    /_/g,
+                    ' '
+                  )}
                 />
               )}
             </div>
@@ -1933,21 +1897,74 @@ export default function Home() {
             <section style={{ marginTop: 28 }}>
               <SectionLabel>EVIDENCE</SectionLabel>
 
-              <div
-                style={{
-                  padding: 16,
-                  background: '#f8fafc',
-                  borderRadius: 12,
-                  color: '#475569',
-                  fontSize: 14,
-                  lineHeight: 1.7,
-                }}
-              >
-                {selectedOrganization.evidence ||
-                  'No evidence provided.'}
-              </div>
+              {Array.isArray(selectedOrganization.evidence) ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {selectedOrganization.evidence.map((item, i) => (
+                    <div
+                      key={`${item.url}-${i}`}
+                      style={{
+                        padding: 14,
+                        background: '#f8fafc',
+                        borderRadius: 12,
+                        fontSize: 13,
+                        lineHeight: 1.65,
+                      }}
+                    >
+                      {item.title && (
+                        <div
+                          style={{
+                            fontWeight: 700,
+                            color: '#334155',
+                            marginBottom: 6,
+                          }}
+                        >
+                          {item.title}
+                        </div>
+                      )}
+
+                      <div style={{ color: '#475569' }}>
+                        {item.content}
+                      </div>
+
+                      {item.url && (
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{
+                            display: 'inline-block',
+                            marginTop: 8,
+                            color: '#4f46e5',
+                            fontSize: 12,
+                            fontWeight: 700,
+                            textDecoration: 'none',
+                          }}
+                        >
+                          Open source →
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    padding: 16,
+                    background: '#f8fafc',
+                    borderRadius: 12,
+                    color: '#475569',
+                    fontSize: 14,
+                    lineHeight: 1.7,
+                    whiteSpace: 'pre-wrap',
+                  }}
+                >
+                  {evidenceToString(selectedOrganization.evidence) ||
+                    'No evidence provided.'}
+                </div>
+              )}
             </section>
 
+            {/* Fallback link if URL exists as entity.url */}
             {selectedOrganization.url && (
               <a
                 href={selectedOrganization.url}
@@ -1996,22 +2013,9 @@ function EmptyState({
     >
       <div style={{ fontSize: 36 }}>{icon}</div>
 
-      <h3
-        style={{
-          margin: '12px 0 6px',
-          color: '#334155',
-        }}
-      >
-        {title}
-      </h3>
+      <h3 style={{ margin: '12px 0 6px', color: '#334155' }}>{title}</h3>
 
-      <p
-        style={{
-          margin: 0,
-          color: '#64748b',
-          fontSize: 14,
-        }}
-      >
+      <p style={{ margin: 0, color: '#64748b', fontSize: 14 }}>
         {description}
       </p>
     </div>
@@ -2059,11 +2063,7 @@ function InfoBox({
   );
 }
 
-function SectionLabel({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div
       style={{
