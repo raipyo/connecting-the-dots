@@ -39,7 +39,7 @@ from exa_py import Exa
 
 load_dotenv()
 
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.0"
 
 app = FastAPI(
     title="Connecting the Dots AI",
@@ -88,7 +88,7 @@ class ResearchRequest(BaseModel):
     budget_tier: str = Field(default="balanced", pattern="^(cheap|balanced|deep)$")
     mode: str = Field(
         default="auto",
-        pattern="^(auto|traction|validation|fundraising|pitching|investor_discovery)$",
+        pattern="^(auto|traction|validation|fundraising|pitching|investor_discovery|customer_acquisition|incubation|application)$",
     )
     include_free_sources: bool = True
 
@@ -97,7 +97,7 @@ class StrategyRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     mode: str = Field(
         default="auto",
-        pattern="^(auto|traction|validation|fundraising|pitching|investor_discovery)$",
+        pattern="^(auto|traction|validation|fundraising|pitching|investor_discovery|customer_acquisition|incubation|application)$",
     )
     budget_tier: str = Field(default="cheap", pattern="^(cheap|balanced|deep)$")
 
@@ -110,6 +110,7 @@ CATEGORIES = [
     "VC", "ANGEL", "ACCELERATOR", "INCUBATOR",
     "FAMILY_OFFICE", "FOUNDATION", "LP", "GRANT",
     "CROWDFUNDING", "COMMUNITY", "CUSTOMER",
+    "PARTNER", "APPLICATION_PROGRAM",
 ]
 
 MODES = {
@@ -118,23 +119,30 @@ MODES = {
     "fundraising",
     "pitching",
     "investor_discovery",
+    "customer_acquisition",
+    "incubation",
+    "application",
 }
 
+# Discovery is intentionally Exa-heavy. Tavily is reserved for targeted
+# verification of the strongest candidates rather than broad discovery.
 EXA_MAX_RESULTS = 6
 MAX_CANDIDATES = 50
-MAX_DEEP_VERIFY = 8
-MAX_LIGHT_VERIFY = 10
-MAX_ADAPTIVE_VERIFY = 5
-MAX_TAVILY_RESULTS = 3
+MAX_DEEP_VERIFY = 5
+MAX_LIGHT_VERIFY = 5
+MAX_ADAPTIVE_VERIFY = 3
+MAX_TAVILY_RESULTS = 2
 MAX_CONCURRENT_SEARCHES = 6
 EXA_TEXT_LIMIT = 3500
-TAVILY_CONTENT_LIMIT = 4500
+TAVILY_CONTENT_LIMIT = 3200
 EVIDENCE_LIMIT = 1400
 
+# Lower Tavily budgets than v5.0.0. The important saving comes from
+# verifying fewer candidates and fewer queries per candidate.
 BUDGETS = {
-    "cheap": {"exa": 8, "tavily": 8, "adaptive_exa": 0},
-    "balanced": {"exa": 12, "tavily": 30, "adaptive_exa": 4},
-    "deep": {"exa": 18, "tavily": 45, "adaptive_exa": 8},
+    "cheap": {"exa": 8, "tavily": 4, "adaptive_exa": 0},
+    "balanced": {"exa": 12, "tavily": 14, "adaptive_exa": 3},
+    "deep": {"exa": 18, "tavily": 22, "adaptive_exa": 6},
 }
 
 SEARCH_CACHE_TTL = int(os.getenv("SEARCH_CACHE_TTL", "86400"))
@@ -273,8 +281,77 @@ FREE_SOURCE_CATALOG: List[Dict[str, Any]] = [
         ],
         "evidence_rule": "Repository stars/issues are directional signals, not equivalent to customers or revenue.",
     },
+    {
+        "id": "nsrcel",
+        "name": "NSRCEL",
+        "kind": "incubator",
+        "mode": ["incubation", "application", "fundraising", "pitching"],
+        "url": "https://nsrcel.org/",
+        "free": True,
+        "description": "Startup incubation and entrepreneurship programs; application and eligibility should be checked for the relevant cohort.",
+        "query_templates": [
+            'site:nsrcel.org incubation startup application',
+            'site:nsrcel.org startup program founders',
+        ],
+        "evidence_rule": "Verify the current cohort, eligibility, deadline and whether funding is part of the specific program.",
+    },
+    {
+        "id": "t-hub",
+        "name": "T-Hub",
+        "kind": "incubator_accelerator",
+        "mode": ["incubation", "application", "pitching", "fundraising"],
+        "url": "https://t-hub.co/",
+        "free": True,
+        "description": "Startup ecosystem platform with programs, corporate connections and investor-facing opportunities; individual programs may have different requirements.",
+        "query_templates": [
+            'site:t-hub.co startup programs apply accelerator incubation',
+            'site:t-hub.co startup investor program pitch',
+        ],
+        "evidence_rule": "Verify the specific program rather than assuming every T-Hub program is free or provides funding.",
+    },
+    {
+        "id": "startup-india",
+        "name": "Startup India",
+        "kind": "government_startup_platform",
+        "mode": ["incubation", "application", "fundraising", "validation"],
+        "url": "https://www.startupindia.gov.in/",
+        "free": True,
+        "description": "Government startup ecosystem platform for schemes, incubators, funding-related resources and startup support.",
+        "query_templates": [
+            'site:startupindia.gov.in incubator startup scheme funding',
+            'site:startupindia.gov.in startup programs apply',
+        ],
+        "evidence_rule": "Verify scheme-specific eligibility, recognition requirements and current application status.",
+    },
+    {
+        "id": "linkedin",
+        "name": "LinkedIn",
+        "kind": "customer_outreach_channel",
+        "mode": ["customer_acquisition", "traction", "pitching"],
+        "url": "https://www.linkedin.com/",
+        "free": True,
+        "description": "Useful for identifying target accounts, decision makers, partners and warm introduction paths.",
+        "query_templates": [
+            'site:linkedin.com company decision maker startup customer',
+            'site:linkedin.com "head of" "procurement" startup',
+        ],
+        "evidence_rule": "Use public profiles as lead signals and verify company roles before outreach.",
+    },
+    {
+        "id": "indiamart",
+        "name": "IndiaMART",
+        "kind": "customer_discovery_channel",
+        "mode": ["customer_acquisition", "traction", "validation"],
+        "url": "https://www.indiamart.com/",
+        "free": True,
+        "description": "B2B marketplace that can be used for supplier/category discovery and customer prospect research.",
+        "query_templates": [
+            'site:indiamart.com buyers suppliers product category',
+            'site:indiamart.com distributors wholesalers product',
+        ],
+        "evidence_rule": "Treat listings as prospecting signals and verify company identity and current buying intent.",
+    },
 ]
-
 
 # ============================================================
 # FILTERS / QUERY TERMS
@@ -286,7 +363,7 @@ NON_ORG_DOMAINS = {
     "techcrunch.com", "forbes.com", "economictimes.indiatimes.com",
     "economictimes.com", "moneycontrol.com", "x.com", "twitter.com",
     "producthunt.com", "news.ycombinator.com", "github.com",
-    "openvc.app", "f6s.com", "ycombinator.com",
+    "openvc.app", "f6s.com", "ycombinator.com", "linkedin.com", "indiamart.com",
 }
 
 GENERIC_NAMES = {
@@ -486,10 +563,35 @@ def detect_mode(query: str, requested_mode: str = "auto") -> str:
         return requested_mode
     q = normalize_text(query)
     patterns = [
-        ("fundraising", ["fundraising", "raise money", "raise capital", "funding", "investor", "grant", "accelerator", "incubator", "vc", "angel"]),
-        ("pitching", ["pitch deck", "pitch", "investor outreach", "cold email", "fundraising deck"]),
-        ("validation", ["validate", "validation", "idea validation", "customer discovery", "market validation", "problem validation", "would pay"]),
-        ("traction", ["traction", "customers", "growth", "users", "distribution", "launch", "early adopters", "go to market"]),
+        ("customer_acquisition", [
+            "acquire customers", "get customers", "find customers", "customer acquisition",
+            "customer leads", "sales leads", "prospects", "buyers", "distributors",
+            "retailers", "b2b customers", "early customers", "design partners",
+        ]),
+        ("incubation", [
+            "incubation", "incubator", "startup program", "startup accelerator",
+            "apply to accelerator", "apply for incubation", "incubation program",
+        ]),
+        ("application", [
+            "apply", "application", "apply to", "applications", "program deadline",
+            "eligibility", "admission",
+        ]),
+        ("fundraising", [
+            "fundraising", "raise money", "raise capital", "funding", "investor",
+            "grant", "vc", "angel", "family office",
+        ]),
+        ("pitching", [
+            "pitch deck", "pitch", "investor outreach", "cold email",
+            "fundraising deck", "pitch investors", "apply and pitch",
+        ]),
+        ("validation", [
+            "validate", "validation", "idea validation", "customer discovery",
+            "market validation", "problem validation", "would pay",
+        ]),
+        ("traction", [
+            "traction", "customers", "growth", "users", "distribution",
+            "launch", "early adopters", "go to market",
+        ]),
     ]
     for mode, terms in patterns:
         if any(term in q for term in terms):
@@ -535,6 +637,9 @@ def detect_categories(query: str) -> List[str]:
         "LP": [" lp ", "limited partner", "fund of funds"],
         "GRANT": ["grant", "non-dilutive", "non dilutive"],
         "CROWDFUNDING": ["crowdfunding", "crowdinvesting"],
+        "CUSTOMER": ["customer", "buyer", "buyers", "prospect", "distributor", "retailer"],
+        "PARTNER": ["partner", "partnership", "channel partner", "design partner"],
+        "APPLICATION_PROGRAM": ["apply", "application", "program", "incubation", "accelerator"],
     }
     found = [category for category, terms in aliases.items() if any(term in q for term in terms)]
     return found or ["VC", "ANGEL", "ACCELERATOR", "INCUBATOR", "GRANT"]
@@ -550,10 +655,33 @@ def build_mode_queries(user_query: str, mode: str, budget_tier: str) -> List[Dic
     categories = detect_categories(user_query)
     queries: List[Dict[str, str]] = []
 
-    if mode == "traction":
+    if mode == "customer_acquisition":
+        queries.extend([
+            {"category": "CUSTOMER", "strategy": "buyer", "query": f'"{user_query}" buyers customers "{geography}"'},
+            {"category": "CUSTOMER", "strategy": "prospects", "query": f'"{user_query}" companies using buying procurement "{geography}"'},
+            {"category": "CUSTOMER", "strategy": "distribution", "query": f'"{user_query}" distributors retailers resellers "{geography}"'},
+            {"category": "PARTNER", "strategy": "channel", "query": f'"{user_query}" channel partners strategic partners "{geography}"'},
+            {"category": "CUSTOMER", "strategy": "pain_signal", "query": f'"{user_query}" complaints alternatives customers'},
+        ])
+    elif mode == "incubation":
+        queries.extend([
+            {"category": "INCUBATOR", "strategy": "program", "query": f'"{geography}" startup incubator "{stage}" application'},
+            {"category": "ACCELERATOR", "strategy": "program", "query": f'"{geography}" startup accelerator "{stage}" application'},
+            {"category": "APPLICATION_PROGRAM", "strategy": "eligibility", "query": f'"{geography}" startup incubation accelerator eligibility "{stage}"'},
+            {"category": "GRANT", "strategy": "support", "query": f'"{geography}" startup incubator grant non-dilutive "{stage}"'},
+            {"category": "APPLICATION_PROGRAM", "strategy": "deadline", "query": f'"{geography}" startup program application deadline "{stage}"'},
+        ])
+    elif mode == "application":
+        queries.extend([
+            {"category": "APPLICATION_PROGRAM", "strategy": "apply", "query": f'"{geography}" startup apply accelerator incubator "{stage}"'},
+            {"category": "ACCELERATOR", "strategy": "application", "query": f'"{geography}" accelerator application "{stage}" startup'},
+            {"category": "INCUBATOR", "strategy": "application", "query": f'"{geography}" incubator application "{stage}" startup'},
+            {"category": "GRANT", "strategy": "application", "query": f'"{geography}" startup grant application "{stage}"'},
+        ])
+    elif mode == "traction":
         queries.extend([
             {"category": "COMMUNITY", "strategy": "distribution", "query": f'"{user_query}" early adopters community launch users'},
-            {"category": "COMMUNITY", "strategy": "feedback", "query": f'"{user_query}" customer feedback complaints alternatives'},
+            {"category": "CUSTOMER", "strategy": "feedback", "query": f'"{user_query}" customer feedback complaints alternatives'},
             {"category": "CUSTOMER", "strategy": "demand", "query": f'"{user_query}" customers buying demand market'},
             {"category": "COMMUNITY", "strategy": "social", "query": f'"{user_query}" traction founders users X community'},
         ])
@@ -568,6 +696,7 @@ def build_mode_queries(user_query: str, mode: str, budget_tier: str) -> List[Dic
         queries.extend([
             {"category": "VC", "strategy": "pitch", "query": f'"{user_query}" startup pitch deck investor'},
             {"category": "VC", "strategy": "outreach", "query": f'"{user_query}" investor outreach cold email'},
+            {"category": "APPLICATION_PROGRAM", "strategy": "demo_day", "query": f'"{user_query}" accelerator incubator demo day pitch'},
             {"category": "VC", "strategy": "thesis", "query": f'"{user_query}" investment thesis {geography} {stage}'},
         ])
     elif mode == "fundraising":
@@ -579,7 +708,6 @@ def build_mode_queries(user_query: str, mode: str, budget_tier: str) -> List[Dic
             {"category": "ANGEL", "strategy": "angel", "query": f'"{geography}" "{stage}" startup angel investor'},
             {"category": "FAMILY_OFFICE", "strategy": "family_office", "query": f'"{geography}" family office startup investment {stage}'},
             {"category": "CROWDFUNDING", "strategy": "crowdfunding", "query": f'"{geography}" startup crowdfunding equity crowdfunding'},
-            {"category": "COMMUNITY", "strategy": "free_resources", "query": f'"{user_query}" free fundraising resources startup founders'},
         ])
     else:
         for category in categories:
@@ -600,12 +728,14 @@ def build_mode_queries(user_query: str, mode: str, budget_tier: str) -> List[Dic
                 strategies = [("program", f'"{geography}" startup incubator funding "{stage}"')]
             elif category == "GRANT":
                 strategies = [("grant", f'"{geography}" startup grant "{stage}" non-dilutive')]
+            elif category == "CUSTOMER":
+                strategies = [("buyer", f'"{user_query}" buyers customers "{geography}"')]
             else:
                 strategies = [("direct", f'"{geography}" {category.lower()} startup investment "{stage}"')]
             for strategy, built_query in strategies:
                 queries.append({"category": category, "strategy": strategy, "query": built_query})
 
-    max_queries = {"cheap": 8, "balanced": 14, "deep": 20}.get(budget_tier, 14)
+    max_queries = {"cheap": 7, "balanced": 11, "deep": 16}.get(budget_tier, 11)
     seen: Set[str] = set()
     output: List[Dict[str, str]] = []
     for item in queries:
@@ -663,18 +793,29 @@ async def exa_search(item: Dict[str, str], budget: RequestBudget, adaptive: bool
         return []
 
 
-async def tavily_search(query: str, category: str, purpose: str, budget: RequestBudget) -> List[Dict[str, Any]]:
-    cache_key = hash_key(query, category, purpose, MAX_TAVILY_RESULTS)
+async def tavily_search(
+    query: str,
+    category: str,
+    purpose: str,
+    budget: RequestBudget,
+    depth: str = "light",
+) -> List[Dict[str, Any]]:
+    # Cache first: repeated verification should cost zero API calls.
+    cache_key = hash_key(query, category, purpose, MAX_TAVILY_RESULTS, depth)
     cached = await cache_get("evidence", cache_key)
     if cached is not None:
         return cached
     if not await budget.consume("tavily"):
         return []
+
     try:
+        # Basic search for most checks; advanced only for the highest-value
+        # verification path. This reduces both request volume and search cost.
+        search_depth = "advanced" if depth == "deep" else "basic"
         response = await asyncio.to_thread(
             tavily_client.search,
             query=query,
-            search_depth="advanced",
+            search_depth=search_depth,
             max_results=MAX_TAVILY_RESULTS,
             include_answer=False,
             include_raw_content=False,
@@ -868,39 +1009,57 @@ def merge_candidates(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # EVIDENCE
 # ============================================================
 
-def build_evidence_queries(candidate: Dict[str, Any], user_query: str, depth: str, mode: str) -> List[Tuple[str, str]]:
+def build_evidence_queries(
+    candidate: Dict[str, Any],
+    user_query: str,
+    depth: str,
+    mode: str,
+) -> List[Tuple[str, str]]:
     name = candidate["name"]
     geography = detect_geography(user_query)
     stage = detect_stage(user_query)
-    category = (candidate.get("categories") or ["VC"])[0]
+    categories = candidate.get("categories") or ["VC"]
+    category = categories[0]
 
-    if mode == "validation":
+    if mode == "customer_acquisition":
+        queries = [
+            (f'"{name}" customers buyers products services', "customer_fit"),
+            (f'"{name}" contact sales procurement partnership', "outreach_path"),
+        ]
+    elif mode in {"incubation", "application"}:
+        queries = [
+            (f'"{name}" application eligibility startup program', "application"),
+            (f'"{name}" deadline cohort funding incubation', "program_details"),
+        ]
+    elif mode == "validation":
         queries = [
             (f'"{name}" customers reviews complaints', "customer_signal"),
-            (f'"{name}" users traction adoption', "traction"),
         ]
     elif mode == "traction":
         queries = [
             (f'"{name}" customers users growth', "customer_signal"),
-            (f'"{name}" launch traction community', "distribution"),
+        ]
+    elif mode == "pitching":
+        queries = [
+            (f'"{name}" investment thesis portfolio startups', "pitch_fit"),
         ]
     elif category == "GRANT":
         queries = [
             (f'"{name}" grant eligibility application', "grant"),
-            (f'"{name}" startup funding deadline', "funding"),
         ]
     elif category == "LP":
         queries = [
             (f'"{name}" limited partner venture capital fund', "lp_relationship"),
-            (f'"{name}" committed to venture capital fund', "fund_commitment"),
         ]
     else:
         queries = [
             (f'"{name}" "{geography}" "{stage}" startups investment', "investment"),
-            (f'"{name}" portfolio startups', "portfolio"),
-            (f'"{name}" investment thesis "{geography}"', "thesis"),
+            (f'"{name}" portfolio startups investment thesis', "portfolio"),
         ]
-    return queries[:1] if depth == "light" else queries
+
+    # Light verification uses exactly one Tavily query per candidate.
+    # Deep verification uses at most two, preventing query fan-out.
+    return queries[:1] if depth == "light" else queries[:2]
 
 
 def evidence_signals(text: str, category: str, user_query: str, mode: str) -> Dict[str, float]:
@@ -970,7 +1129,7 @@ async def verify_candidate(candidate: Dict[str, Any], user_query: str, budget: R
 
     async def run(query: str, purpose: str) -> List[Dict[str, Any]]:
         async with semaphore:
-            return await tavily_search(query, category, purpose, budget)
+            return await tavily_search(query, category, purpose, budget, depth)
 
     responses = await asyncio.gather(*[run(query, purpose) for query, purpose in queries], return_exceptions=True)
     evidence: List[Dict[str, Any]] = []
@@ -1072,6 +1231,9 @@ async def verify_candidate(candidate: Dict[str, Any], user_query: str, budget: R
         "INCUBATOR": "INCUBATOR_TO_STARTUP",
         "GRANT": "GRANT_TO_STARTUP",
         "CROWDFUNDING": "CROWDFUNDING_TO_STARTUP",
+        "CUSTOMER": "STARTUP_TO_CUSTOMER",
+        "PARTNER": "STARTUP_TO_PARTNER",
+        "APPLICATION_PROGRAM": "STARTUP_TO_PROGRAM",
     }.get(category, "INVESTOR_TO_STARTUP")
 
     verified = {
@@ -1129,7 +1291,7 @@ def build_free_source_queries(query: str, mode: str) -> List[Dict[str, str]]:
                 "query": template,
                 "source_id": source["id"],
             })
-    return output[:8]
+    return output[:6]
 
 
 # ============================================================
@@ -1216,7 +1378,31 @@ def build_entity(candidate: Dict[str, Any], user_query: str, mode: str) -> Optio
         "verification_score": candidate.get("verification_score", 0),
         "final_score": final_score,
         "providers": ["exa", "tavily"],
-        "source": "Exa + Tavily",
+        "source": "Exa discovery + selective Tavily verification",
+        "opportunity": {
+            "kind": (
+                "customer"
+                if category == "CUSTOMER"
+                else "program_application"
+                if category in {"ACCELERATOR", "INCUBATOR", "APPLICATION_PROGRAM", "GRANT"}
+                else "investor"
+                if category in {"VC", "ANGEL", "FAMILY_OFFICE", "LP"}
+                else "partner"
+                if category == "PARTNER"
+                else "resource"
+            ),
+            "next_action": (
+                "identify_buyer_and_send_customer_pitch"
+                if category == "CUSTOMER"
+                else "check_eligibility_and_apply"
+                if category in {"ACCELERATOR", "INCUBATOR", "APPLICATION_PROGRAM", "GRANT"}
+                else "prepare_targeted_investor_pitch"
+                if category in {"VC", "ANGEL", "FAMILY_OFFICE", "LP"}
+                else "prepare_partnership_pitch"
+                if category == "PARTNER"
+                else "review_resource"
+            ),
+        },
         "search_query": user_query,
     }
 
@@ -1231,6 +1417,15 @@ def build_relationships(entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if relationship == "LP_TO_FUND":
             target_type = "VENTURE_FUND"
             target_name = "Venture Capital Fund"
+        elif relationship == "STARTUP_TO_CUSTOMER":
+            target_type = "CUSTOMER"
+            target_name = "Target Customer"
+        elif relationship == "STARTUP_TO_PARTNER":
+            target_type = "PARTNER"
+            target_name = "Strategic Partner"
+        elif relationship == "STARTUP_TO_PROGRAM":
+            target_type = "PROGRAM"
+            target_name = "Startup Program"
         else:
             target_name = f"{entity.get('stage', 'Early Stage')} Startup"
         target_id = str(uuid.uuid5(uuid.NAMESPACE_URL, normalize_name(f"{target_type}:{target_name}")))
@@ -1256,15 +1451,45 @@ def build_relationships(entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # STRATEGY ENGINE
 # ============================================================
 
-def build_action_plan(query: str, mode: str, resources: List[Dict[str, Any]], entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_action_plan(
+    query: str,
+    mode: str,
+    resources: List[Dict[str, Any]],
+    entities: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
-    if mode == "fundraising":
+
+    if mode == "customer_acquisition":
         actions = [
-            {"step": 1, "action": "Validate the fundraising target", "detail": "Define stage, geography, sector, round size and the investor problem-fit before outreach."},
-            {"step": 2, "action": "Use free-first channels", "detail": "Start with public/free-core resources and accelerator/grant applications before paying for databases."},
-            {"step": 3, "action": "Build an evidence-backed investor list", "detail": "Connect investor thesis, geography, stage, portfolio and recent activity."},
+            {"step": 1, "action": "Define the ideal customer profile", "detail": "Specify industry, company size, geography, buyer role, trigger and the problem that creates buying urgency."},
+            {"step": 2, "action": "Build a qualified prospect list", "detail": "Prioritize real companies, distributors, retailers and decision makers instead of generic audience lists."},
+            {"step": 3, "action": "Create a customer-specific pitch", "detail": "Use the prospect's problem, current alternative, expected outcome and a low-friction pilot or demo ask."},
+            {"step": 4, "action": "Run a small outreach experiment", "detail": "Contact a focused batch, measure replies, meetings, demos and pilots, then improve the message before scaling."},
+            {"step": 5, "action": "Turn early wins into proof", "detail": "Capture testimonials, pilot results, conversion rates, savings, revenue or other measurable customer outcomes."},
+        ]
+    elif mode in {"incubation", "application"}:
+        actions = [
+            {"step": 1, "action": "Build an application-ready startup profile", "detail": "Prepare problem, solution, target customer, traction, team, market, business model and current stage."},
+            {"step": 2, "action": "Match the program", "detail": "Check documented stage, geography, sector, eligibility, cohort timing, fees and funding terms before applying."},
+            {"step": 3, "action": "Prepare the application pitch", "detail": "Adapt the one-liner, deck, demo and founder story to the program's stated selection criteria."},
+            {"step": 4, "action": "Prepare for the interview or pitch", "detail": "Practice problem clarity, customer evidence, differentiation, traction, market logic, team capability and the specific ask."},
+            {"step": 5, "action": "Track applications", "detail": "Record application date, deadline, status, contact, interview, feedback and next action so opportunities do not get lost."},
+        ]
+    elif mode == "fundraising":
+        actions = [
+            {"step": 1, "action": "Define the fundraising target", "detail": "Set stage, geography, sector, round size, instrument and milestones before outreach."},
+            {"step": 2, "action": "Apply to programs first", "detail": "Review relevant accelerators, incubators and grants alongside direct investor outreach; verify current eligibility and deadlines."},
+            {"step": 3, "action": "Build an evidence-backed investor list", "detail": "Connect investor thesis, geography, stage, portfolio, check-size signals and recent activity."},
             {"step": 4, "action": "Prepare a proof package", "detail": "Combine product demo, customer evidence, traction, market insight and a concise pitch deck."},
             {"step": 5, "action": "Run measured outreach", "detail": "Track contact, response, meeting, diligence and next-step signals instead of sending mass messages."},
+        ]
+    elif mode == "pitching":
+        actions = [
+            {"step": 1, "action": "Create a one-sentence thesis", "detail": "State the customer, painful problem, product, measurable outcome and why now."},
+            {"step": 2, "action": "Lead with customer evidence", "detail": "Put customer proof, pilots, revenue, usage or other observable signals before broad market claims."},
+            {"step": 3, "action": "Match the pitch to the target", "detail": "Tie the pitch to documented investor, incubator or accelerator stage, geography, sector and program fit."},
+            {"step": 4, "action": "Make the ask explicit", "detail": "State the requested funding, introduction, pilot, incubation support or partnership and what happens next."},
+            {"step": 5, "action": "Prepare follow-up material", "detail": "Have the deck, one-pager, demo, metrics and evidence links ready for a fast response after the pitch."},
         ]
     elif mode == "validation":
         actions = [
@@ -1280,23 +1505,17 @@ def build_action_plan(query: str, mode: str, resources: List[Dict[str, Any]], en
             {"step": 3, "action": "Capture proof", "detail": "Collect active users, retention, conversions, testimonials and customer outcomes."},
             {"step": 4, "action": "Feed results back into validation", "detail": "Use behavior to update the target customer and product positioning."},
         ]
-    elif mode == "pitching":
-        actions = [
-            {"step": 1, "action": "Create a one-sentence thesis", "detail": "State customer, painful problem, product and why now."},
-            {"step": 2, "action": "Lead with evidence", "detail": "Put customer proof and traction before broad market claims."},
-            {"step": 3, "action": "Match the investor", "detail": "Tie the pitch to documented stage, geography, sector and portfolio fit."},
-            {"step": 4, "action": "Make the ask explicit", "detail": "State round size, instrument if known, milestones and use of funds."},
-        ]
     else:
         actions = [
-            {"step": 1, "action": "Clarify the target relationship", "detail": "Decide whether you need customers, investors, partners, talent or validation."},
-            {"step": 2, "action": "Map entities", "detail": "Use the graph to connect organizations, communities, programs and evidence."},
+            {"step": 1, "action": "Clarify the target relationship", "detail": "Decide whether you need customers, investors, programs, partners, talent or validation."},
+            {"step": 2, "action": "Map entities", "detail": "Use the graph to connect organizations, customers, programs, communities and evidence."},
             {"step": 3, "action": "Verify before acting", "detail": "Prioritize primary sources and recent evidence for decisions."},
         ]
+
     actions.append({
         "step": len(actions) + 1,
-        "action": "Review free sources first",
-        "detail": f"Matched {len(resources)} free/core resources for this mode; verify each program's current eligibility before applying.",
+        "action": "Review free-first routes",
+        "detail": f"Matched {len(resources)} free/core resources for this mode; verify each current eligibility, deadline and terms before applying or contacting.",
     })
     return actions
 
@@ -1362,7 +1581,11 @@ async def search_web(query: str, adaptive: bool = True, limit: int = 25, budget_
             raw_results.extend(response)
 
     candidates = merge_candidates(raw_results)
-    tier_limits = {"cheap": (2, 4), "balanced": (MAX_DEEP_VERIFY, MAX_LIGHT_VERIFY), "deep": (MAX_DEEP_VERIFY, MAX_LIGHT_VERIFY)}
+    tier_limits = {
+        "cheap": (2, 2),
+        "balanced": (MAX_DEEP_VERIFY, MAX_LIGHT_VERIFY),
+        "deep": (MAX_DEEP_VERIFY, MAX_LIGHT_VERIFY),
+    }
     deep_limit, light_limit = tier_limits.get(budget_tier, tier_limits["balanced"])
     deep_candidates = candidates[:deep_limit]
     light_candidates = candidates[deep_limit:deep_limit + light_limit]
@@ -1379,13 +1602,13 @@ async def search_web(query: str, adaptive: bool = True, limit: int = 25, budget_
     deep_results = await asyncio.gather(*[verify(candidate, "deep") for candidate in deep_candidates], return_exceptions=True)
     verified.extend(result for result in deep_results if isinstance(result, dict) and result.get("name"))
 
-    if len(verified) < min(limit, 10):
+    if len(verified) < min(limit, 8):
         light_results = await asyncio.gather(*[verify(candidate, "light") for candidate in light_candidates], return_exceptions=True)
         verified.extend(result for result in light_results if isinstance(result, dict) and result.get("name"))
 
     adaptive_queries: List[Dict[str, str]] = []
     adaptive_raw: List[Dict[str, Any]] = []
-    if adaptive and budget.remaining.get("adaptive_exa", 0) > 0 and len(verified) < min(limit, 10):
+    if adaptive and budget.remaining.get("adaptive_exa", 0) > 0 and len(verified) < min(limit, 8):
         adaptive_queries = build_adaptive_queries(verified, query, mode)
         adaptive_responses = await asyncio.gather(*[limited_exa(item, adaptive_call=True) for item in adaptive_queries], return_exceptions=True)
         for response in adaptive_responses:
@@ -1449,7 +1672,7 @@ async def research_query(query: str, adaptive: bool = True, limit: int = 25, bud
 
     answer_parts = [
         f"Mode: {mode}",
-        f"Found {len(entities)} verified/relevant entities for \"{query}\".",
+        f"Found {len(entities)} verified/relevant targets for \"{query}\".",
         "",
         "Free-first resources:",
     ]
@@ -1468,6 +1691,9 @@ async def research_query(query: str, adaptive: bool = True, limit: int = 25, bud
         "resources": resources,
         "opportunities": resources,
         "investors": [e for e in entities if e.get("type") in {"VC", "ANGEL", "FAMILY_OFFICE", "LP"}],
+        "customers": [e for e in entities if e.get("type") == "CUSTOMER"],
+        "programs": [e for e in entities if e.get("type") in {"ACCELERATOR", "INCUBATOR", "APPLICATION_PROGRAM", "GRANT"}],
+        "partners": [e for e in entities if e.get("type") == "PARTNER"],
         "actions": actions,
         "citations": [ev for entity in entities for ev in entity.get("evidence", [])][:50],
         "providers": {"exa": True, "tavily": True},
@@ -1577,7 +1803,7 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "providers": {
             "exa": {"configured": bool(EXA_API_KEY), "role": "semantic discovery"},
-            "tavily": {"configured": bool(TAVILY_API_KEY), "role": "targeted evidence verification"},
+            "tavily": {"configured": bool(TAVILY_API_KEY), "role": "selective evidence verification"},
         },
         "budgets": BUDGETS,
         "cache": {
@@ -1605,9 +1831,11 @@ async def root():
             "pitching",
             "investor_discovery",
             "free_source_discovery",
+            "customer_acquisition",
+            "incubation_and_applications",
             "relationship_graph",
         ],
-        "pipeline": "intent -> free-source matching -> Exa discovery -> entity resolution -> targeted Tavily verification -> adaptive discovery -> confidence -> actions -> relationship graph",
+        "pipeline": "intent -> free-source matching -> Exa discovery -> entity resolution -> top-candidate Tavily verification -> selective adaptive discovery -> confidence -> customer/program/investor actions -> relationship graph",
     }
 
 
